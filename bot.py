@@ -552,13 +552,13 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not text:
         await update.message.reply_text(
-            "Send your order list — one item per line or comma-separated:\n\n"
+            "Send your order list with quantities — one item per line:\n\n"
             "Example:\n"
-            "marlboro red short\n"
-            "coke 20oz\n"
-            "doritos nacho\n"
-            "black mild ft sweet\n\n"
-            "_I'll group by cheapest vendor._",
+            "marlboro red short x5\n"
+            "coke 20oz x10\n"
+            "doritos nacho x3\n"
+            "black mild ft sweet x2\n\n"
+            "_I'll show totals per vendor, flag missing items, and suggest the cheapest option._",
             parse_mode=ParseMode.MARKDOWN,
         )
         # Save a flag so next message is treated as the order list
