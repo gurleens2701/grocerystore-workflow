@@ -1,0 +1,15 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+.env
+stores/
+.git
+*.pdf
+*.png
+*.heic
+*.ppm
+*.jpg
+*.jpeg
+memory/
+agents/

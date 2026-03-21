@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /Users/gurleensingh/gas-station-agent/*.py)",
+      "Bash(ssh root@87.99.129.21 \"cd /app && docker-compose exec -T app alembic upgrade head 2>&1\")"
+    ]
+  }
+}

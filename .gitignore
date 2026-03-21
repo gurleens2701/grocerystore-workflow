@@ -1,0 +1,22 @@
+# Environment & secrets
+.env
+stores/
+config/google_credentials.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Reports (generated output)
+reports/
+
+# Misc
+.DS_Store
+*.heic
+*.pdf
+*.ppm
+*.png
