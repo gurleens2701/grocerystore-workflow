@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     postgres_user: str = "gasbot"
     postgres_password: str = ""
 
+    # Dashboard auth
+    dashboard_username: str = "admin"
+    dashboard_password: str = "changeme"
+    jwt_secret: str = "change-this-secret-in-production"
+
     # Plaid (optional per store)
     plaid_enabled: bool = False
     plaid_client_id: str = ""
