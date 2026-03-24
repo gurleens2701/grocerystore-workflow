@@ -35,6 +35,7 @@ from tools.intent_router import classify_message
 from tools.invoice_extractor import extract_invoice_from_photo
 from tools.nrs_tools import fetch_daily_sales, fetch_inventory
 from tools.price_lookup import compile_order, lookup_item_price, parse_order_list
+from tools.health_score import send_weekly_health_score
 from tools.query_agent import answer_query
 from tools.reports import save_daily_report
 from tools.vendor_agent import get_vendor_comparison
@@ -924,6 +925,16 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"⚠️ Error: {e}", parse_mode=None)
 
 
+async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/health — show last week's health score report."""
+    await update.message.reply_text("📊 Calculating weekly health score...", parse_mode=None)
+    try:
+        await send_weekly_health_score(settings.store_id, context.bot, settings.telegram_chat_id)
+    except Exception as e:
+        log.error("Health score command failed: %s", e, exc_info=True)
+        await update.message.reply_text(f"⚠️ Error: {e}", parse_mode=None)
+
+
 # ---------------------------------------------------------------------------
 # Build and return the Application
 # ---------------------------------------------------------------------------
@@ -948,6 +959,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("vendors", cmd_vendors))
     app.add_handler(CommandHandler("price", cmd_price))
     app.add_handler(CommandHandler("order", cmd_order))
+    app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     # Plain-text invoice entries (outside conversation) e.g. "heidelburg 500 3/9"
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_plain_text_invoice))

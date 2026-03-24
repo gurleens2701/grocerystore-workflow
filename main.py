@@ -72,6 +72,17 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
         replace_existing=True,
     )
 
+    # Weekly health score — every Monday at 8:00 AM
+    from tools.health_score import send_weekly_health_score
+    scheduler.add_job(
+        send_weekly_health_score,
+        args=[settings.store_id, app.bot, settings.telegram_chat_id],
+        trigger=CronTrigger(day_of_week="mon", hour=8, minute=0),
+        id="weekly_health_score",
+        name="Weekly Health Score",
+        replace_existing=True,
+    )
+
     async with app:
         await app.start()
 
