@@ -212,6 +212,111 @@ async def _build_health_score_async(store_id: str) -> str:
     return "\n".join(lines)
 
 
+async def _build_health_score_structured(store_id: str) -> dict:
+    """Return health score as structured data for the web dashboard."""
+    week_start, week_end = _week_range()
+
+    async with get_async_session() as session:
+        sales_rows = (await session.execute(
+            select(DailySales).where(
+                and_(DailySales.store_id == store_id,
+                     DailySales.sale_date >= week_start,
+                     DailySales.sale_date <= week_end)
+            )
+        )).scalars().all()
+
+        days_logged = len(sales_rows)
+        total_sales = sum(float(r.grand_total or 0) for r in sales_rows)
+
+        over_shorts = []
+        for r in sales_rows:
+            if r.lotto_po is not None:
+                total_payments = sum(float(getattr(r, col) or 0) for col in [
+                    "cash_drop", "card", "check_amount", "lotto_po", "lotto_cr",
+                    "atm", "pull_tab", "coupon", "food_stamp", "loyalty", "vendor_payout"
+                ])
+                over_shorts.append(total_payments - float(r.grand_total or 0))
+
+        avg_over_short = (sum(abs(x) for x in over_shorts) / len(over_shorts)) if over_shorts else 0.0
+
+        inventory_bought = float((await session.execute(
+            select(func.sum(Invoice.amount)).where(
+                and_(Invoice.store_id == store_id,
+                     Invoice.invoice_date >= week_start,
+                     Invoice.invoice_date <= week_end)
+            )
+        )).scalar() or 0)
+
+        expense_rows = (await session.execute(
+            select(Expense.category, func.sum(Expense.amount)).where(
+                and_(Expense.store_id == store_id,
+                     Expense.expense_date >= week_start,
+                     Expense.expense_date <= week_end)
+            ).group_by(Expense.category)
+        )).fetchall()
+
+    payroll = 0.0
+    other_expenses = 0.0
+    for cat, amt in expense_rows:
+        amt = float(amt or 0)
+        if "payroll" in (cat or "").lower() or "salary" in (cat or "").lower():
+            payroll += amt
+        else:
+            other_expenses += amt
+
+    total_expenses = payroll + other_expenses
+    expense_ratio = (total_expenses / total_sales) if total_sales > 0 else 0.0
+
+    s_days = _score_days_logged(days_logged)
+    s_os = _score_over_short(avg_over_short)
+    s_exp = _score_expense_ratio(expense_ratio)
+    total_score = s_days + s_os + s_exp
+
+    return {
+        "week": f"{week_start.strftime('%b %d')} – {week_end.strftime('%b %d, %Y')}",
+        "score": total_score,
+        "label": _score_label(total_score).split(" ", 1)[1],  # strip emoji
+        "label_color": (
+            "green" if total_score >= 85 else
+            "yellow" if total_score >= 70 else
+            "orange" if total_score >= 50 else "red"
+        ),
+        "metrics": [
+            {
+                "name": "Days Logged",
+                "value": f"{days_logged}/7",
+                "detail": f"{s_days}/40 pts",
+                "score": s_days,
+                "max": 40,
+                "status": "good" if days_logged == 7 else "warn" if days_logged >= 5 else "bad",
+            },
+            {
+                "name": "Over/Short Avg",
+                "value": f"${avg_over_short:.2f}" if over_shorts else "N/A",
+                "detail": f"{s_os}/40 pts — {_over_short_label(avg_over_short)}" if over_shorts else "right-side not filled",
+                "score": s_os,
+                "max": 40,
+                "status": "good" if s_os >= 30 else "warn" if s_os >= 20 else "bad",
+            },
+            {
+                "name": "Expense Ratio",
+                "value": f"{expense_ratio*100:.1f}%",
+                "detail": f"{s_exp}/20 pts",
+                "score": s_exp,
+                "max": 20,
+                "status": "good" if s_exp >= 15 else "warn" if s_exp >= 10 else "bad",
+            },
+        ],
+        "financials": {
+            "sales": total_sales,
+            "inventory": inventory_bought,
+            "payroll": payroll,
+            "other_expenses": other_expenses,
+        },
+        "days_missing": max(0, 7 - days_logged),
+    }
+
+
 async def send_weekly_health_score(store_id: str, bot, chat_id: str) -> None:
     """Called by the scheduler every Monday at 8 AM."""
     try:

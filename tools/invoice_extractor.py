@@ -14,7 +14,6 @@ import re
 import anthropic
 
 from config.settings import settings
-from tools.normalizer import normalize_items
 
 _SYSTEM_PROMPT = """\
 You are extracting line items from a convenience store vendor invoice. \
@@ -151,13 +150,7 @@ def extract_invoice_from_photo(photo_bytes: bytes) -> dict:
 
         raw_text = message.content[0].text
         data = _parse_claude_json(raw_text)
-        result = _normalise_result(data)
-
-        # Normalize item names into canonical keys
-        if result["items"]:
-            result["items"] = normalize_items(result["items"], settings.store_id)
-
-        return result
+        return _normalise_result(data)
 
     except Exception as exc:  # pylint: disable=broad-except
         return {**_EMPTY_RESULT, "error": str(exc)}
@@ -196,13 +189,7 @@ def extract_invoice_from_text(text: str) -> dict:
 
         raw_text = message.content[0].text
         data = _parse_claude_json(raw_text)
-        result = _normalise_result(data)
-
-        # Normalize item names into canonical keys
-        if result["items"]:
-            result["items"] = normalize_items(result["items"], settings.store_id)
-
-        return result
+        return _normalise_result(data)
 
     except Exception as exc:  # pylint: disable=broad-except
         return {**_EMPTY_RESULT, "error": str(exc)}

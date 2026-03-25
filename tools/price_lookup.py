@@ -17,7 +17,7 @@ from decimal import Decimal
 from sqlalchemy import and_, func, select
 
 from config.settings import settings
-from db.database import get_async_session
+from db.database import get_async_session, get_session_for_store
 from db.models import InvoiceItem
 
 
@@ -41,7 +41,7 @@ def _ilike_conditions(words: list[str]):
     ]
 
 
-def _latest_price_per_vendor(words: list[str]):
+def _latest_price_per_vendor(words: list[str], store_id: str):
     """Subquery + join to get min unit_price on the latest invoice date per vendor."""
     ilike = _ilike_conditions(words)
 
@@ -50,7 +50,7 @@ def _latest_price_per_vendor(words: list[str]):
             InvoiceItem.vendor,
             func.max(InvoiceItem.invoice_date).label("max_date"),
         )
-        .where(and_(InvoiceItem.store_id == settings.store_id, *ilike))
+        .where(and_(InvoiceItem.store_id == store_id, *ilike))
         .group_by(InvoiceItem.vendor)
         .subquery()
     )
@@ -69,7 +69,7 @@ def _latest_price_per_vendor(words: list[str]):
                 InvoiceItem.invoice_date == latest_sq.c.max_date,
             ),
         )
-        .where(and_(InvoiceItem.store_id == settings.store_id, *ilike))
+        .where(and_(InvoiceItem.store_id == store_id, *ilike))
         .group_by(InvoiceItem.vendor, InvoiceItem.item_name, latest_sq.c.max_date)
         .order_by(func.min(InvoiceItem.unit_price))
     )
@@ -137,13 +137,14 @@ def parse_order_list(text: str) -> list[dict]:
 # lookup_item_price
 # ---------------------------------------------------------------------------
 
-async def _lookup_item_price_async(item_query: str) -> str:
+async def _lookup_item_price_async(item_query: str, store_id: str | None = None) -> str:
+    sid = store_id or settings.store_id
     words = item_query.strip().split()
     if not words:
         return "Please provide an item name to search for."
 
-    async with get_async_session() as session:
-        rows_q = _latest_price_per_vendor(words)
+    async with get_session_for_store(sid) as session:
+        rows_q = _latest_price_per_vendor(words, sid)
 
         # UPC fallback for short single-word queries
         upc_rows = []
@@ -157,7 +158,7 @@ async def _lookup_item_price_async(item_query: str) -> str:
                 )
                 .where(
                     and_(
-                        InvoiceItem.store_id == settings.store_id,
+                        InvoiceItem.store_id == sid,
                         InvoiceItem.upc == words[0],
                     )
                 )
@@ -201,12 +202,13 @@ async def _lookup_item_price_async(item_query: str) -> str:
 # compile_order — all vendors, totals, missing items, cheapest suggestion
 # ---------------------------------------------------------------------------
 
-async def _compile_order_async(item_list: list[dict]) -> str:
+async def _compile_order_async(item_list: list[dict], store_id: str | None = None) -> str:
     """
     For each item (with qty), find ALL vendors that carry it and their price.
     Build a per-vendor total. Show cheapest vendor, flag missing items per vendor.
     Suggest split order if cheapest vendor is missing items.
     """
+    sid = store_id or settings.store_id
     if not item_list:
         return "No items provided."
 
@@ -214,7 +216,7 @@ async def _compile_order_async(item_list: list[dict]) -> str:
     all_vendors: dict[str, dict] = {}
     not_in_system: list[str] = []  # items not found in DB at all
 
-    async with get_async_session() as session:
+    async with get_session_for_store(sid) as session:
         for entry in item_list:
             raw_item = entry["item"]
             qty = entry["qty"]
@@ -222,7 +224,7 @@ async def _compile_order_async(item_list: list[dict]) -> str:
             if not words:
                 continue
 
-            rows_q = _latest_price_per_vendor(words)
+            rows_q = _latest_price_per_vendor(words, sid)
             result = await session.execute(rows_q)
             rows = result.fetchall()
 

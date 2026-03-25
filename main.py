@@ -19,6 +19,7 @@ Run on schedule:        python main.py
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -41,11 +42,13 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
 
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
 
+    tz = settings.timezone
+
     # Daily NRS fetch — 7:00 AM store timezone
     scheduler.add_job(
         scheduled_daily,
         args=[app],
-        trigger=CronTrigger(hour=hour, minute=minute),
+        trigger=CronTrigger(hour=hour, minute=minute, timezone=tz),
         id="daily_fetch",
         name="Daily NRS Fetch",
         replace_existing=True,
@@ -55,7 +58,7 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
     scheduler.add_job(
         run_nightly_sync,
         args=[settings.store_id],
-        trigger=CronTrigger(hour=0, minute=0),
+        trigger=CronTrigger(hour=0, minute=0, timezone=tz),
         id="nightly_sync",
         name="Nightly Sheets → PostgreSQL Sync",
         replace_existing=True,
@@ -66,7 +69,7 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
     scheduler.add_job(
         run_cash_flow_summary,
         args=[settings.store_id, app.bot, settings.telegram_chat_id],
-        trigger=CronTrigger(day="last", hour=8, minute=0),
+        trigger=CronTrigger(day="last", hour=8, minute=0, timezone=tz),
         id="month_end_cashflow",
         name="Month-End Cash Flow Summary",
         replace_existing=True,
@@ -77,7 +80,7 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
     scheduler.add_job(
         send_weekly_health_score,
         args=[settings.store_id, app.bot, settings.telegram_chat_id],
-        trigger=CronTrigger(day_of_week="mon", hour=8, minute=0),
+        trigger=CronTrigger(day_of_week="mon", hour=8, minute=0, timezone=tz),
         id="weekly_health_score",
         name="Weekly Health Score",
         replace_existing=True,
@@ -111,12 +114,20 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
         scheduler.start()
         await app.updater.start_polling(drop_pending_updates=True)
 
+        stop_event = asyncio.Event()
+
+        def _handle_signal():
+            log.info("Shutdown signal received — stopping bot cleanly.")
+            stop_event.set()
+
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, _handle_signal)
+
         try:
-            await asyncio.Event().wait()
-        except (KeyboardInterrupt, SystemExit):
-            pass
+            await stop_event.wait()
         finally:
-            scheduler.shutdown()
+            scheduler.shutdown(wait=False)
             await app.updater.stop()
             await app.stop()
 

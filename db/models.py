@@ -259,6 +259,22 @@ class InvoiceItem(Base):
 
 
 # ---------------------------------------------------------------------------
+# message_log — unified log of all Telegram + web chat messages
+# ---------------------------------------------------------------------------
+
+class MessageLog(Base):
+    __tablename__ = "message_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)   # "telegram" | "web"
+    role: Mapped[str] = mapped_column(String(16), nullable=False)     # "user" | "bot"
+    sender_name: Mapped[str] = mapped_column(String(64), nullable=False)  # "Owner", employee name, "Bot"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+# ---------------------------------------------------------------------------
 # conversation_history — for Telegram AI assistant
 # ---------------------------------------------------------------------------
 

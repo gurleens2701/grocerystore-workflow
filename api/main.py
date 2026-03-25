@@ -3,10 +3,11 @@ FastAPI backend for the gas station dashboard.
 Runs on port 8000. Nginx proxies /api/* here.
 """
 
-from datetime import date, timedelta
+import asyncio
+from datetime import date, datetime, timedelta
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -14,10 +15,12 @@ from sqlalchemy import and_, func, select
 
 from api.auth import authenticate_user, create_access_token, decode_token
 from config.settings import settings
-from db.database import get_async_session
-from db.models import DailySales, Expense, Invoice, InvoiceItem
-from tools.health_score import _build_health_score_async
-from tools.price_lookup import _compile_order_async
+from db.database import get_session_for_store
+from db.models import DailySales, Expense, Invoice, InvoiceItem, MessageLog
+from db.ops import log_message
+from tools.chat_handler import process_message as chat_process_message
+from tools.health_score import _build_health_score_async, _build_health_score_structured
+from tools.price_lookup import _compile_order_async, _lookup_item_price_async, parse_order_list
 
 app = FastAPI(title="Gas Station Dashboard API", docs_url=None, redoc_url=None)
 
@@ -33,14 +36,26 @@ security = HTTPBearer()
 
 
 # ---------------------------------------------------------------------------
-# Auth dependency
+# Auth dependency + store resolver
 # ---------------------------------------------------------------------------
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     payload = decode_token(credentials.credentials)
     if not payload:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    # Normalize: old tokens had store_id (str), new have store_ids (list)
+    if "store_ids" not in payload:
+        payload["store_ids"] = [payload.get("store_id", settings.store_id)]
     return payload
+
+
+def resolve_store(store_id: Optional[str], user: dict) -> str:
+    """Validate requested store_id is in the user's allowed list. Default to first."""
+    allowed: list[str] = user.get("store_ids", [settings.store_id])
+    sid = store_id or (allowed[0] if allowed else settings.store_id)
+    if sid not in allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied for this store")
+    return sid
 
 
 # ---------------------------------------------------------------------------
@@ -56,19 +71,43 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     store_name: str
+    store_ids: list[str]
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(body: LoginRequest):
     if not authenticate_user(body.username, body.password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    token = create_access_token({"sub": body.username, "store_id": settings.store_id})
-    return LoginResponse(access_token=token, store_name=settings.store_id.title())
+    store_ids = settings.allowed_stores
+    token = create_access_token({"sub": body.username, "store_ids": store_ids})
+    return LoginResponse(
+        access_token=token,
+        store_name=store_ids[0].replace("_", " ").title(),
+        store_ids=store_ids,
+    )
 
 
 @app.get("/api/auth/me")
 async def me(user: dict = Depends(get_current_user)):
-    return {"username": user.get("sub"), "store_id": user.get("store_id")}
+    store_ids: list[str] = user.get("store_ids", [settings.store_id])
+    return {
+        "username": user.get("sub"),
+        "store_id": store_ids[0] if store_ids else settings.store_id,
+        "store_ids": store_ids,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stores list
+# ---------------------------------------------------------------------------
+
+@app.get("/api/stores")
+async def list_stores(user: dict = Depends(get_current_user)):
+    store_ids: list[str] = user.get("store_ids", [settings.store_id])
+    return [
+        {"id": sid, "name": sid.replace("_", " ").title()}
+        for sid in store_ids
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -76,17 +115,20 @@ async def me(user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sales")
-async def get_sales(days: int = 7, user: dict = Depends(get_current_user)):
-    """Return last N days of daily sales."""
-    store_id = settings.store_id
+async def get_sales(
+    days: int = 7,
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    sid = resolve_store(store_id, user)
     since = date.today() - timedelta(days=days)
 
-    async with get_async_session() as session:
+    async with get_session_for_store(sid) as session:
         result = await session.execute(
             select(DailySales)
             .where(
                 and_(
-                    DailySales.store_id == store_id,
+                    DailySales.store_id == sid,
                     DailySales.sale_date >= since,
                 )
             )
@@ -111,6 +153,7 @@ async def get_sales(days: int = 7, user: dict = Depends(get_current_user)):
             "food_stamp": float(r.food_stamp or 0),
             "total_transactions": r.total_transactions or 0,
             "over_short": _calc_over_short(r),
+            "departments": r.departments or [],
         }
         for r in rows
     ]
@@ -131,9 +174,13 @@ def _calc_over_short(r: DailySales) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
-async def get_health(user: dict = Depends(get_current_user)):
-    report = await _build_health_score_async(settings.store_id)
-    return {"report": report}
+async def get_health(
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    sid = resolve_store(store_id, user)
+    data = await _build_health_score_structured(sid)
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +188,14 @@ async def get_health(user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/prices")
-async def search_prices(q: str = "", user: dict = Depends(get_current_user)):
-    """Search invoice items by name."""
-    store_id = settings.store_id
+async def search_prices(
+    q: str = "",
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    sid = resolve_store(store_id, user)
 
-    async with get_async_session() as session:
+    async with get_session_for_store(sid) as session:
         words = q.strip().split() if q.strip() else []
 
         base = select(
@@ -155,7 +205,7 @@ async def search_prices(q: str = "", user: dict = Depends(get_current_user)):
             InvoiceItem.unit_price,
             InvoiceItem.category,
             InvoiceItem.invoice_date,
-        ).where(InvoiceItem.store_id == store_id)
+        ).where(InvoiceItem.store_id == sid)
 
         if words:
             conditions = [
@@ -192,12 +242,14 @@ class OrderItem(BaseModel):
 
 class OrderRequest(BaseModel):
     items: list[OrderItem]
+    store_id: Optional[str] = None
 
 
 @app.post("/api/order")
 async def compile_order_api(body: OrderRequest, user: dict = Depends(get_current_user)):
+    sid = resolve_store(body.store_id, user)
     item_list = [{"item": i.item, "qty": i.qty} for i in body.items]
-    result = await _compile_order_async(item_list)
+    result = await _compile_order_async(item_list, store_id=sid)
     return {"summary": result}
 
 
@@ -206,8 +258,147 @@ async def compile_order_api(body: OrderRequest, user: dict = Depends(get_current
 # ---------------------------------------------------------------------------
 
 @app.get("/api/settings")
-async def get_settings(user: dict = Depends(get_current_user)):
+async def get_settings(
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    sid = resolve_store(store_id, user)
     return {
-        "store_name": settings.store_id.title(),
+        "store_name": sid.replace("_", " ").title(),
         "google_sheet_url": f"https://docs.google.com/spreadsheets/d/{settings.google_sheet_id}",
     }
+
+
+# ---------------------------------------------------------------------------
+# Chat routes — unified Telegram + web message history
+# ---------------------------------------------------------------------------
+
+@app.get("/api/messages")
+async def get_messages(
+    limit: int = 50,
+    since: Optional[str] = Query(None),  # ISO timestamp
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    """Return message history. Poll with ?since=<last_timestamp> for updates."""
+    sid = resolve_store(store_id, user)
+
+    async with get_session_for_store(sid) as session:
+        q = select(MessageLog).where(MessageLog.store_id == sid)
+        if since:
+            try:
+                since_dt = datetime.fromisoformat(since)
+                q = q.where(MessageLog.created_at > since_dt)
+            except ValueError:
+                pass
+        q = q.order_by(MessageLog.created_at.asc()).limit(limit)
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+    return [
+        {
+            "id": r.id,
+            "source": r.source,
+            "role": r.role,
+            "sender_name": r.sender_name,
+            "content": r.content,
+            "created_at": r.created_at.isoformat(),
+        }
+        for r in rows
+    ]
+
+
+class ChatRequest(BaseModel):
+    message: str
+    sender_name: str = "Employee"
+    store_id: Optional[str] = None
+
+
+@app.post("/api/chat")
+async def web_chat(body: ChatRequest, user: dict = Depends(get_current_user)):
+    """Process a message from the web chat UI. Mirrors to Telegram."""
+    sid = resolve_store(body.store_id, user)
+    msg = body.message.strip()
+    sender = body.sender_name or user.get("sub", "Employee")
+
+    # Log incoming web message
+    await log_message(sid, "web", "user", sender, msg)
+
+    # Route the command
+    reply = await chat_process_message(msg, sid)
+
+    # Log bot reply
+    await log_message(sid, "web", "bot", "Bot", reply)
+
+    # Mirror to Telegram so owner sees it
+    try:
+        from telegram import Bot
+        bot = Bot(token=settings.telegram_bot_token)
+        tg_text = f"💬 *{sender}*: {msg}\n\n{reply}"
+        await bot.send_message(
+            chat_id=settings.telegram_chat_id,
+            text=tg_text,
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass  # Telegram mirror failure must not block web response
+
+    return {"reply": reply}
+
+
+
+@app.post("/api/chat/invoice")
+async def web_chat_invoice(
+    file: UploadFile = File(...),
+    sender_name: str = Form("Employee"),
+    store_id: Optional[str] = Form(None),
+    user: dict = Depends(get_current_user),
+):
+    """Extract invoice from uploaded photo. Returns items for confirmation."""
+    sid = resolve_store(store_id, user)
+    sender = sender_name or user.get("sub", "Employee")
+
+    photo_bytes = await file.read()
+    await log_message(sid, "web", "user", sender, f"📸 Uploaded invoice photo ({file.filename})")
+
+    from tools.invoice_extractor import extract_invoice_from_photo
+    from tools.normalizer import _normalize_async
+
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, extract_invoice_from_photo, photo_bytes
+    )
+
+    if result.get("error"):
+        reply = f"⚠️ Could not read invoice: {result['error']}"
+        await log_message(sid, "web", "bot", "Bot", reply)
+        return {"error": reply}
+
+    items = result.get("items", [])
+    if items:
+        try:
+            items = await _normalize_async(items, sid)
+        except Exception:
+            pass  # normalization failure must not block the response
+    vendor = result.get("vendor", "Unknown")
+    total = result.get("total")
+
+    summary = f"📋 Extracted {len(items)} items from {vendor}"
+    if total:
+        summary += f" — Total: ${total:.2f}"
+    await log_message(sid, "web", "bot", "Bot", summary)
+
+    # Notify Telegram
+    try:
+        from telegram import Bot
+        bot = Bot(token=settings.telegram_bot_token)
+        await bot.send_message(
+            chat_id=settings.telegram_chat_id,
+            text=f"💬 *{sender}* uploaded an invoice\n\n{summary}",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+    return {"vendor": vendor, "total": total, "items": items, "summary": summary}
+
+

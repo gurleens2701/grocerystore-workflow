@@ -26,11 +26,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from config.settings import settings
 from db.database import get_async_session
-from db.models import Expense, Rebate, Revenue
+from db.models import DailySales, Expense, Rebate, Revenue
 from tools.sheets_tools import (
+    DAILY_HEADERS,
     EXPENSES_HEADERS,
     PROFIT_HEADERS,
     REBATES_HEADERS,
+    _DAILY_DATA_START,
     _EXP_DATA_START,
     _PROFIT_COL_START,
     _REV_DATA_START,
@@ -219,6 +221,91 @@ async def _sync_revenues(
     return updates
 
 
+async def _sync_daily_sales(
+    store_id: str,
+    sheet: gspread.Worksheet,
+    target_date: date,
+    num_days: int,
+) -> int:
+    """Sync DAILY SALES section from Sheets → PostgreSQL. Returns count of upserts."""
+    # Read the entire daily sales block in one API call
+    end_row = _DAILY_DATA_START + num_days - 1
+    end_col = len(DAILY_HEADERS)
+    start_a1 = gspread.utils.rowcol_to_a1(_DAILY_DATA_START, 1)
+    end_a1 = gspread.utils.rowcol_to_a1(end_row, end_col)
+    rows = sheet.get(f"{start_a1}:{end_a1}")
+
+    updates = 0
+    dept_names = [
+        "BEER", "CIGS", "DAIRY", "N.TAX", "TAX", "ICE", "LBAIT",
+        "PIZZA", "POP", "PREROLL", "TOBBACO", "VAPE", "WINE", "PROPANE",
+    ]
+    # Column indices (0-based) in DAILY_HEADERS
+    h = DAILY_HEADERS
+    idx = {name: h.index(name) for name in h}
+
+    async with get_async_session() as session:
+        for row_i, row in enumerate(rows):
+            day = row_i + 1
+            if day > num_days or not row:
+                continue
+
+            def cell(col_name: str) -> Decimal:
+                i = idx.get(col_name, -1)
+                if i < 0 or i >= len(row):
+                    return Decimal(0)
+                return _to_decimal(row[i]) or Decimal(0)
+
+            sale_date = date(target_date.year, target_date.month, day)
+            product_sales = cell("SALE")
+            grand_total = cell("G.TOT")
+            if product_sales == 0 and grand_total == 0:
+                continue  # empty row, skip
+
+            departments = [
+                {"name": d, "sales": float(cell(d)), "items": 0} for d in dept_names
+            ]
+
+            # Check if record already exists
+            result = await session.execute(
+                select(DailySales).where(
+                    DailySales.store_id == store_id,
+                    DailySales.sale_date == sale_date,
+                )
+            )
+            existing = result.scalar_one_or_none()
+
+            kwargs = dict(
+                product_sales=product_sales,
+                lotto_online=cell("ONLINE"),
+                lotto_in=cell("INSTANT"),
+                lotto_po=cell("LOTTO"),
+                lotto_cr=cell("L.CREDIT"),
+                atm=cell("ATM"),
+                cash_drop=cell("CASH"),
+                check_amount=cell("CHECK"),
+                card=cell("CREDIT"),
+                coupon=cell("COUPON"),
+                pull_tab=cell("P.TAB"),
+                sales_tax=cell("S.TAX"),
+                food_stamp=cell("FOODS"),
+                vendor_payout=cell("PAYOUT"),
+                loyalty=cell("2 ALTRI"),
+                grand_total=grand_total,
+                departments=departments,
+            )
+
+            if existing is None:
+                session.add(DailySales(store_id=store_id, sale_date=sale_date, **kwargs))
+                updates += 1
+            else:
+                for k, v in kwargs.items():
+                    setattr(existing, k, v)
+                updates += 1
+
+    return updates
+
+
 async def run_nightly_sync(store_id: str) -> None:
     """
     Main nightly sync entry point. Called by APScheduler at midnight.
@@ -235,14 +322,15 @@ async def run_nightly_sync(store_id: str) -> None:
         import calendar
         num_days = calendar.monthrange(today.year, today.month)[1]
 
+        sales_count = await _sync_daily_sales(store_id, sheet, today, num_days)
         exp_count = await _sync_expenses(store_id, sheet, today, num_days)
         reb_count = await _sync_rebates(store_id, sheet, today, num_days)
         rev_count = await _sync_revenues(store_id, sheet, today, num_days)
 
-        total = exp_count + reb_count + rev_count
+        total = sales_count + exp_count + reb_count + rev_count
         log.info(
-            "[%s] Nightly sync complete — %d expenses, %d rebates, %d revenues synced (%d total)",
-            store_id, exp_count, reb_count, rev_count, total,
+            "[%s] Nightly sync complete — %d sales, %d expenses, %d rebates, %d revenues (%d total)",
+            store_id, sales_count, exp_count, reb_count, rev_count, total,
         )
 
         # Run anomaly checks after sync so we have latest data

@@ -29,13 +29,13 @@ from telegram.ext import (
 )
 
 from config.settings import settings
-from db.ops import save_daily_sales, save_expense, save_invoice, save_invoice_items, save_rebate, save_revenue, save_vendor_price
+from db.ops import log_message, save_daily_sales, save_expense, save_invoice, save_invoice_items, save_rebate, save_revenue, save_vendor_price
 from db.state import clear_state, get_state, save_state
 from tools.intent_router import classify_message
 from tools.invoice_extractor import extract_invoice_from_photo
 from tools.nrs_tools import fetch_daily_sales, fetch_inventory
 from tools.price_lookup import compile_order, lookup_item_price, parse_order_list
-from tools.health_score import send_weekly_health_score
+from tools.health_score import _build_health_score_async, send_weekly_health_score
 from tools.query_agent import answer_query
 from tools.reports import save_daily_report
 from tools.vendor_agent import get_vendor_comparison
@@ -285,10 +285,13 @@ async def _do_daily_fetch(bot: Bot, chat_id: str) -> bool:
 
         msg = _fmt_left(sales) + _prompt_for_right_side()
         await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
+        asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", msg))
         return True
     except Exception as e:
         log.error("Daily fetch failed: %s", e, exc_info=True)
-        await bot.send_message(chat_id=chat_id, text=f"❌ Error fetching data: {e}", parse_mode=None)
+        err = f"❌ Error fetching data: {e}"
+        await bot.send_message(chat_id=chat_id, text=err, parse_mode=None)
+        asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", err))
         return False
 
 
@@ -376,23 +379,68 @@ async def scheduled_daily(app: Application) -> None:
 # Invoice / COGS handlers
 # ---------------------------------------------------------------------------
 
-def _parse_invoice_text(text: str) -> dict[str, Any] | None:
+def _extract_invoice_fields(text: str) -> dict[str, Any] | None:
     """
-    Parse a text invoice entry. Accepts formats like:
-      Heidelburg $500 3/9
-      heidelburg 500 03/09/2026
-      vendor: glazer amount: 320 date: 3/8
-    Returns dict with vendor, amount, entry_date or None if unparseable.
+    Use Claude Haiku to extract vendor, amount, and date from natural language.
+    Falls back to regex for structured inputs like 'mclane $2100 3/14'.
     """
-    text_lower = text.lower().strip()
+    try:
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=128,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Extract the vendor name, dollar amount, and date from this message. "
+                    "The vendor is a company or store name (like Pepsi, McLane, Heidelburg, Roma). "
+                    "Ignore filler like 'log it', 'Google Sheet', 'in March', etc. "
+                    f"Message: \"{text}\"\n\n"
+                    "Reply in exactly this format (no extra text):\n"
+                    "VENDOR: <name>\nAMOUNT: <number>\nDATE: <YYYY-MM-DD>\n"
+                    "If a field is missing, write UNKNOWN."
+                ),
+            }],
+        )
+        result: dict = {}
+        for line in msg.content[0].text.strip().splitlines():
+            if ":" in line:
+                key, _, val = line.partition(":")
+                result[key.strip().upper()] = val.strip()
 
-    # Amount: look for number (with optional $ and decimals)
+        vendor = result.get("VENDOR", "UNKNOWN")
+        if not vendor or vendor == "UNKNOWN":
+            return _parse_invoice_text_regex(text)
+
+        try:
+            amount = float(result.get("AMOUNT", "0").replace("$", "").replace(",", ""))
+        except ValueError:
+            m = re.search(r"\$?(\d+(?:\.\d{1,2})?)", text)
+            amount = float(m.group(1)) if m else 0.0
+
+        raw_date = result.get("DATE", "UNKNOWN")
+        entry_date = date.today()
+        if raw_date and raw_date != "UNKNOWN":
+            try:
+                entry_date = date.fromisoformat(raw_date)
+            except ValueError:
+                pass
+
+        if amount == 0.0:
+            return None
+        return {"vendor": vendor, "amount": amount, "entry_date": entry_date}
+
+    except Exception:
+        return _parse_invoice_text_regex(text)
+
+
+def _parse_invoice_text_regex(text: str) -> dict[str, Any] | None:
+    """Regex fallback for structured inputs like: mclane $2100 3/14"""
     amount_match = re.search(r"\$?(\d+(?:\.\d{1,2})?)", text)
     if not amount_match:
         return None
     amount = float(amount_match.group(1))
 
-    # Date: look for M/D, M/D/YYYY, YYYY-MM-DD
     date_match = re.search(
         r"(\d{4}-\d{2}-\d{2})|(\d{1,2}/\d{1,2}(?:/\d{2,4})?)", text
     )
@@ -412,7 +460,6 @@ def _parse_invoice_text(text: str) -> dict[str, Any] | None:
         except (ValueError, IndexError):
             pass
 
-    # Vendor: everything that isn't the amount or date
     vendor_text = re.sub(r"\$?\d+(?:\.\d{1,2})?", "", text)
     vendor_text = re.sub(r"\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:/\d{2,4})?", "", vendor_text)
     vendor_text = re.sub(r"[:\-]", " ", vendor_text)
@@ -420,7 +467,6 @@ def _parse_invoice_text(text: str) -> dict[str, Any] | None:
 
     if not vendor:
         return None
-
     return {"vendor": vendor, "amount": amount, "entry_date": entry_date}
 
 
@@ -489,7 +535,7 @@ async def cmd_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    parsed = _parse_invoice_text(text)
+    parsed = await asyncio.get_event_loop().run_in_executor(None, _extract_invoice_fields, text)
     if not parsed:
         await update.message.reply_text(
             "⚠️ Could not parse. Try: /invoice Heidelburg 500 3/9", parse_mode=None
@@ -497,11 +543,12 @@ async def cmd_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     try:
-        result = log_cogs_entry(
-            vendor=parsed["vendor"],
-            amount=parsed["amount"],
-            entry_date=parsed["entry_date"],
-        )
+        vendor = parsed["vendor"]
+        amount = parsed["amount"]
+        entry_date = parsed["entry_date"]
+        invoice_id = await save_invoice(settings.store_id, vendor, amount, entry_date)
+        await save_vendor_price(settings.store_id, vendor, amount, entry_date, invoice_id)
+        result = log_cogs_entry(vendor=vendor, amount=amount, entry_date=entry_date)
         await update.message.reply_text(f"✅ {result}", parse_mode=None)
     except Exception as e:
         log.error("COGS log failed: %s", e, exc_info=True)
@@ -689,7 +736,7 @@ async def _handle_revenue(update: Update, text: str) -> None:
 
 
 async def _handle_invoice_text(update: Update, text: str) -> None:
-    parsed = _parse_invoice_text(text)
+    parsed = await asyncio.get_event_loop().run_in_executor(None, _extract_invoice_fields, text)
     if not parsed:
         await update.message.reply_text("⚠️ Could not parse invoice. Try: mclane $2100 3/14", parse_mode=None)
         return
@@ -731,6 +778,8 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     Priority 2: intent classification → expense / rebate / revenue / invoice / query.
     """
     text = update.message.text.strip()
+    sender = update.effective_user.first_name or "Owner"
+    asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, text))
 
     # ── Priority 1: pending daily sheet ─────────────────────────────────────
     sales = await get_state(settings.store_id, _STATE_SALES)
@@ -813,27 +862,21 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         await _process_order(update, text)
         return
 
-    # ── Priority 4: intent routing ───────────────────────────────────────────
+    # ── Priority 4: daily fetch starts the state machine; everything else → unified agent ──
     intent = await asyncio.get_event_loop().run_in_executor(None, classify_message, text)
-    log.info("Intent classified as: %s for message: %s", intent, text[:60])
+    log.info("Intent: %s | %s", intent, text[:60])
 
-    if intent == "expense":
-        await _handle_expense(update, text)
-    elif intent == "rebate":
-        await _handle_rebate(update, text)
-    elif intent == "revenue":
-        await _handle_revenue(update, text)
-    elif intent == "invoice":
-        await _handle_invoice_text(update, text)
-    elif intent == "query":
-        await update.message.reply_text("🤔 Looking that up...", parse_mode=None)
+    if intent == "daily_fetch":
+        await _do_daily_fetch(context.bot, settings.telegram_chat_id)
+    else:
+        from tools.main_agent import run_agent
         try:
-            reply = await asyncio.get_event_loop().run_in_executor(None, answer_query, text)
+            reply = await asyncio.get_event_loop().run_in_executor(None, run_agent, text, settings.store_id)
             await update.message.reply_text(reply, parse_mode=None)
+            asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", reply))
         except Exception as e:
-            log.error("Query agent failed: %s", e, exc_info=True)
-            await update.message.reply_text(f"⚠️ Couldn't answer: {e}", parse_mode=None)
-    # unknown → silently ignore
+            log.error("Agent failed: %s", e, exc_info=True)
+            await update.message.reply_text(f"⚠️ Something went wrong: {e}", parse_mode=None)
 
 
 def _fmt_extracted_items(result: dict) -> str:
@@ -878,6 +921,8 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
     Handle a photo message — extract line items via Claude Sonnet vision.
     Shows extracted items to user for review before saving.
     """
+    sender = update.effective_user.first_name or "Owner"
+    asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, "📸 Sent an invoice photo"))
     await update.message.reply_text("📸 Reading invoice, this may take a few seconds...", parse_mode=None)
 
     try:
@@ -925,6 +970,18 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"⚠️ Error: {e}", parse_mode=None)
 
 
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/sync — manually trigger the nightly Sheets → DB sync right now."""
+    from tools.sync import run_nightly_sync
+    await update.message.reply_text("🔄 Syncing Google Sheets → database...", parse_mode=None)
+    try:
+        await run_nightly_sync(settings.store_id)
+        await update.message.reply_text("✅ Sync complete. You can now query sales, expenses, and more.", parse_mode=None)
+    except Exception as e:
+        log.error("Manual sync failed: %s", e, exc_info=True)
+        await update.message.reply_text(f"⚠️ Sync failed: {e}", parse_mode=None)
+
+
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/health — show last week's health score report."""
     await update.message.reply_text("📊 Calculating weekly health score...", parse_mode=None)
@@ -960,6 +1017,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("price", cmd_price))
     app.add_handler(CommandHandler("order", cmd_order))
     app.add_handler(CommandHandler("health", cmd_health))
+    app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     # Plain-text invoice entries (outside conversation) e.g. "heidelburg 500 3/9"
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_plain_text_invoice))

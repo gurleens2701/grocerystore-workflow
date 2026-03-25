@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     dashboard_username: str = "admin"
     dashboard_password: str = "changeme"
     jwt_secret: str = "change-this-secret-in-production"
+    # Comma-separated list of store IDs this dashboard user can access.
+    # e.g. DASHBOARD_STORES=moraine,liberty
+    dashboard_stores: str = ""
+
+    @property
+    def allowed_stores(self) -> list[str]:
+        raw = self.dashboard_stores.strip()
+        if raw:
+            return [s.strip() for s in raw.split(",") if s.strip()]
+        return [self.store_id]
 
     # Plaid (optional per store)
     plaid_enabled: bool = False

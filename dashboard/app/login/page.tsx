@@ -1,7 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { api, setToken } from '@/lib/api'
+import { api, setToken, setStoreIds, setActiveStore } from '@/lib/api'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -18,6 +18,9 @@ export default function LoginPage() {
     setLoading(false)
     if (res?.access_token) {
       setToken(res.access_token)
+      const ids: string[] = res.store_ids || []
+      setStoreIds(ids)
+      setActiveStore(ids[0] || '')
       router.push('/dashboard')
     } else {
       setError('Invalid username or password')
@@ -29,7 +32,7 @@ export default function LoginPage() {
       <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="text-4xl mb-2">⛽</div>
-          <h1 className="text-2xl font-bold text-gray-900">Moraine Foodmart</h1>
+          <h1 className="text-2xl font-bold text-gray-900">GasBot</h1>
           <p className="text-gray-500 text-sm mt-1">Store Dashboard</p>
         </div>
 

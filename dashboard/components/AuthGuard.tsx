@@ -1,24 +1,25 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { getToken, api } from '@/lib/api'
+import { getToken, getStoreIds, getActiveStore, formatStoreName } from '@/lib/api'
 import Sidebar from './Sidebar'
 
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const [ready, setReady] = useState(false)
-  const [storeName, setStoreName] = useState('')
+  const [storeIds, setStoreIds] = useState<string[]>([])
+  const [activeStore, setActiveStore] = useState('')
 
   useEffect(() => {
     if (!getToken()) {
       router.replace('/login')
       return
     }
-    api.me().then(res => {
-      if (!res) return
-      setStoreName(res.store_id?.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()) || '')
-      setReady(true)
-    })
+    const ids = getStoreIds()
+    const active = getActiveStore()
+    setStoreIds(ids)
+    setActiveStore(active)
+    setReady(true)
   }, [router])
 
   if (!ready) return (
@@ -29,7 +30,11 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar storeName={storeName} />
+      <Sidebar
+        storeName={activeStore ? formatStoreName(activeStore) : undefined}
+        storeIds={storeIds}
+        activeStore={activeStore}
+      />
       <main className="flex-1 overflow-auto">{children}</main>
     </div>
   )

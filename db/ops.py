@@ -11,7 +11,28 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from db.database import get_async_session
-from db.models import BankTransaction, DailySales, Expense, Invoice, InvoiceItem, Rebate, Revenue, VendorPrice
+from db.models import BankTransaction, DailySales, Expense, Invoice, InvoiceItem, MessageLog, Rebate, Revenue, VendorPrice
+
+
+async def log_message(
+    store_id: str,
+    source: str,   # "telegram" | "web"
+    role: str,     # "user" | "bot"
+    sender_name: str,
+    content: str,
+) -> None:
+    """Append one message to the unified message log. Fire-and-forget safe."""
+    try:
+        async with get_async_session() as session:
+            session.add(MessageLog(
+                store_id=store_id,
+                source=source,
+                role=role,
+                sender_name=sender_name,
+                content=content,
+            ))
+    except Exception:
+        pass  # logging must never crash the caller
 
 
 # ---------------------------------------------------------------------------

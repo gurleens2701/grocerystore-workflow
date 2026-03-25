@@ -50,22 +50,25 @@ async def _authenticate() -> str:
 
         page.on("response", _capture)
 
-        await page.goto(_BASE_URL)
-        await asyncio.sleep(4)
+        # Wait for page to be fully interactive before filling credentials
+        await page.goto(_BASE_URL, wait_until="domcontentloaded")
+        await page.wait_for_selector("[name=creduser]", timeout=30000)
 
         await page.fill("[name=creduser]", settings.nrs_username)
         await page.fill("[name=credpass]", settings.nrs_password)
         await page.click('button:has-text("Sign In")')
 
+        # Store selector dialog — wait up to 20s
         try:
-            await page.wait_for_selector("select", timeout=15000)
+            await page.wait_for_selector("select", timeout=20000)
             await page.select_option("select", label=_LOGIN_STORE_LABEL)
             await asyncio.sleep(1)
             await page.click('button:has-text("OK")')
         except Exception:
             pass
 
-        for _ in range(20):
+        # Wait up to 30s for the auth token to be captured
+        for _ in range(60):
             if token:
                 break
             await asyncio.sleep(0.5)

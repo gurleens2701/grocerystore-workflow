@@ -26,6 +26,7 @@ services:
       dockerfile: Dockerfile
     command: python main.py
     restart: always
+    stop_grace_period: 15s
     env_file: .env
     environment:
       STORE_ID: moraine
