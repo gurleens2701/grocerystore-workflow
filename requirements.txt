@@ -35,6 +35,9 @@ alembic>=1.13.0
 anthropic>=0.25.0
 tzdata
 
+# OpenAI Whisper — voice transcription (99 languages)
+openai>=1.0.0
+
 # Dashboard API
 fastapi>=0.110.0
 uvicorn>=0.29.0

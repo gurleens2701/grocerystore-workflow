@@ -112,7 +112,7 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
             )
 
         scheduler.start()
-        await app.updater.start_polling(drop_pending_updates=True)
+        await app.updater.start_polling(drop_pending_updates=False)
 
         stop_event = asyncio.Event()
 

@@ -916,6 +916,103 @@ def _fmt_extracted_items(result: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/language [name] — set preferred language for voice transcription."""
+    from tools.voice import SUPPORTED_LANGUAGES
+
+    if not context.args:
+        current = (await get_state(settings.store_id, "language_pref")) or {}
+        lang = current.get("name", "auto (English)")
+        lang_list = ", ".join(k.title() for k in SUPPORTED_LANGUAGES if k != "auto")
+        await update.message.reply_text(
+            f"Current language: {lang}\n\nAvailable: {lang_list}, Auto\n\nUsage: /language hindi",
+            parse_mode=None,
+        )
+        return
+
+    name = " ".join(context.args).lower().strip()
+    if name not in SUPPORTED_LANGUAGES:
+        await update.message.reply_text(
+            f"Language '{name}' not recognised. Try: hindi, gujarati, punjabi, spanish, arabic, urdu, auto",
+            parse_mode=None,
+        )
+        return
+
+    code = SUPPORTED_LANGUAGES[name]
+    await save_state(settings.store_id, "language_pref", {"name": name.title(), "code": code})
+    if name == "auto":
+        await update.message.reply_text("Language set to auto-detect.", parse_mode=None)
+    else:
+        await update.message.reply_text(f"Language set to {name.title()}. Voice messages will be transcribed in {name.title()}.", parse_mode=None)
+
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle Telegram voice messages — transcribe with Whisper, then run through agent."""
+    from tools.voice import transcribe_voice
+    from tools.main_agent import run_agent
+
+    sender = update.effective_user.first_name or "Owner"
+    asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, "🎤 Voice message"))
+
+    # Get language preference
+    lang_pref = await get_state(settings.store_id, "language_pref") or {}
+    lang_code = lang_pref.get("code")  # None = auto-detect
+
+    await update.message.reply_text("🎤 Listening...", parse_mode=None)
+
+    try:
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = bytes(await file.download_as_bytearray())
+
+        # Transcribe
+        text = await asyncio.get_event_loop().run_in_executor(
+            None, transcribe_voice, audio_bytes, lang_code
+        )
+
+        if not text:
+            await update.message.reply_text("Could not understand the audio. Please try again.", parse_mode=None)
+            return
+
+        log.info("Voice transcribed: %s", text[:100])
+        asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, f"🎤 {text}"))
+
+        # Check if this is a pending daily sheet response
+        sales = await get_state(settings.store_id, _STATE_SALES)
+        if sales:
+            right = _parse_right_side(text)
+            if right is not None:
+                sheet_msg = _build_complete_sheet(sales, right)
+                await update.message.reply_text(sheet_msg, parse_mode=ParseMode.MARKDOWN)
+                try:
+                    sales_for_sheet = dict(sales)
+                    sales_for_sheet.update(right)
+                    log_daily_sales(sales_for_sheet)
+                    await save_daily_sales(settings.store_id, sales, right)
+                    save_daily_report(settings.store_id, sales, right)
+                    await update.message.reply_text("Logged to Google Sheets.", parse_mode=None)
+                except Exception as e:
+                    await update.message.reply_text(f"Sheets logging failed: {e}", parse_mode=None)
+                await clear_state(settings.store_id, _STATE_SALES)
+                return
+
+        # Otherwise run through unified agent
+        intent = await asyncio.get_event_loop().run_in_executor(None, classify_message, text)
+        if intent == "daily_fetch":
+            await _do_daily_fetch(context.bot, settings.telegram_chat_id)
+        else:
+            reply = await asyncio.get_event_loop().run_in_executor(None, run_agent, text, settings.store_id)
+            await update.message.reply_text(reply, parse_mode=None)
+            asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", reply))
+
+    except ValueError as e:
+        # Missing API key
+        await update.message.reply_text(str(e), parse_mode=None)
+    except Exception as e:
+        log.error("Voice handler failed: %s", e, exc_info=True)
+        await update.message.reply_text(f"Could not process voice message: {e}", parse_mode=None)
+
+
 async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle a photo message — extract line items via Claude Sonnet vision.
@@ -1018,6 +1115,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("order", cmd_order))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("sync", cmd_sync))
+    app.add_handler(CommandHandler("language", cmd_language))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     # Plain-text invoice entries (outside conversation) e.g. "heidelburg 500 3/9"
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_plain_text_invoice))

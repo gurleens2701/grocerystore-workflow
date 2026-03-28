@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # Anthropic
     anthropic_api_key: str = ""
 
+    # OpenAI — Whisper voice transcription (optional, enables voice messages)
+    openai_api_key: str = ""
+
     # NRS POS
     nrs_username: str = ""
     nrs_password: str = ""
