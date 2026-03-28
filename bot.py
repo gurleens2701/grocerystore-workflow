@@ -11,6 +11,7 @@ Daily flow:
 
 import asyncio
 import base64
+import io
 import logging
 import re
 from datetime import date, timedelta
@@ -1002,8 +1003,21 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await _do_daily_fetch(context.bot, settings.telegram_chat_id)
         else:
             reply = await asyncio.get_event_loop().run_in_executor(None, run_agent, text, settings.store_id)
-            await update.message.reply_text(reply, parse_mode=None)
             asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", reply))
+
+            # Send voice reply + text reply
+            try:
+                from tools.voice import text_to_speech
+                audio = await asyncio.get_event_loop().run_in_executor(
+                    None, text_to_speech, reply
+                )
+                await update.message.reply_voice(
+                    voice=io.BytesIO(audio),
+                    caption=reply,
+                )
+            except Exception as tts_err:
+                log.warning("TTS failed, falling back to text: %s", tts_err)
+                await update.message.reply_text(reply, parse_mode=None)
 
     except ValueError as e:
         # Missing API key
