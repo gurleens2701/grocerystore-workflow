@@ -524,6 +524,76 @@ async def _extract_invoice_via_claude(photo_bytes: bytes) -> dict[str, Any] | No
     return {"vendor": vendor, "amount": amount, "entry_date": entry_date}
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/help — show all available features."""
+    msg = (
+        "Here is everything I can do for you:\n"
+        "\n"
+        "DAILY SALES\n"
+        "I automatically send your sales numbers every morning at 7AM.\n"
+        "You reply with 3 numbers (Lotto PO, Lotto Credit, Food Stamp) to complete the sheet.\n"
+        "Or type: daily report\n"
+        "\n"
+        "INVOICES\n"
+        "Take a photo of any vendor invoice and send it — I will read it and log it.\n"
+        "Or send it as a file for better accuracy.\n"
+        "Or just type: Pepsi $300 March 22\n"
+        "Command: /invoice Pepsi 300 3/22\n"
+        "\n"
+        "EXPENSES\n"
+        "Type things like:\n"
+        "  electricity $340 March 10\n"
+        "  rent $2500\n"
+        "  payroll $1200 this week\n"
+        "\n"
+        "QUESTIONS — ask me anything\n"
+        "  How much did I make this week?\n"
+        "  What did I spend on McLane last month?\n"
+        "  Who is my cheapest vendor for cigarettes?\n"
+        "  What was my best day in March?\n"
+        "  How much cash did I drop this month?\n"
+        "  Do I owe Roma anything?\n"
+        "\n"
+        "VENDOR PRICES\n"
+        "  /price marlboro red\n"
+        "  /vendors — compare all vendors by category\n"
+        "\n"
+        "ORDERS\n"
+        "  /order chips water energy drinks\n"
+        "  Or type: I need to order Marlboro and Pepsi\n"
+        "  I will tell you the cheapest vendor for each item.\n"
+        "\n"
+        "HEALTH SCORE\n"
+        "  Type: health score\n"
+        "  Or: how is my store doing\n"
+        "  I send you a weekly score every Monday morning.\n"
+        "\n"
+        "CASH FLOW\n"
+        "  Type: cash flow March\n"
+        "  I will pull all your sales and expenses and give you a full monthly summary.\n"
+        "\n"
+        "VOICE MESSAGES\n"
+        "  Send me a voice message in any language — I will understand and reply.\n"
+        "  Set your language: /language hindi\n"
+        "  Available: Hindi, Gujarati, Punjabi, Spanish, Arabic, Urdu, Bengali,\n"
+        "             Chinese, Korean, Vietnamese, Portuguese, French, English\n"
+        "\n"
+        "GOOGLE SHEET\n"
+        "  Everything is automatically saved to your Google Sheet.\n"
+        "  You can also edit the sheet directly — I sync changes every night.\n"
+        "\n"
+        "WEB DASHBOARD\n"
+        "  View reports, invoices, vendor prices, and health score at:\n"
+        f"  http://178.104.61.18\n"
+        "\n"
+        "SYNC\n"
+        "  /sync — manually pull latest changes from your Google Sheet right now.\n"
+        "\n"
+        "Just talk to me naturally — you do not need to use commands."
+    )
+    await update.message.reply_text(msg, parse_mode=None)
+
+
 async def cmd_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/invoice vendor amount date — log a COGS purchase directly."""
     text = " ".join(context.args) if context.args else ""
@@ -1127,6 +1197,7 @@ def build_app() -> Application:
     )
 
     app.add_handler(conv)
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("invoice", cmd_invoice))
     app.add_handler(CommandHandler("vendors", cmd_vendors))
     app.add_handler(CommandHandler("price", cmd_price))
