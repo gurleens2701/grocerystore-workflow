@@ -172,7 +172,7 @@ def extract_invoice_from_photo(photo_bytes: bytes) -> dict:
         b64_data = base64.standard_b64encode(photo_bytes).decode("utf-8")
 
         message = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-6",
             max_tokens=4096,
             temperature=0.3,
             system=_SYSTEM_PROMPT,

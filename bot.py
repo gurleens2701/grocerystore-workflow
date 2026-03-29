@@ -1029,16 +1029,20 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle a photo message — extract line items via Claude Sonnet vision.
-    Shows extracted items to user for review before saving.
+    Handle a photo or document message — extract line items via Claude Opus vision.
+    Accepts photos (Telegram-compressed) and documents (full quality, better OCR).
     """
     sender = update.effective_user.first_name or "Owner"
     asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, "📸 Sent an invoice photo"))
     await update.message.reply_text("📸 Reading invoice, this may take a few seconds...", parse_mode=None)
 
     try:
-        photo = update.message.photo[-1]  # largest size
-        file = await context.bot.get_file(photo.file_id)
+        # Prefer document (uncompressed) over photo (Telegram-compressed)
+        if update.message.document:
+            file = await context.bot.get_file(update.message.document.file_id)
+        else:
+            photo = update.message.photo[-1]  # largest compressed size
+            file = await context.bot.get_file(photo.file_id)
         photo_bytes = await file.download_as_bytearray()
 
         result = await asyncio.get_event_loop().run_in_executor(
@@ -1132,6 +1136,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
+    app.add_handler(MessageHandler(filters.Document.IMAGE, handle_invoice_photo))
     # Plain-text invoice entries (outside conversation) e.g. "heidelburg 500 3/9"
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_plain_text_invoice))
     return app
