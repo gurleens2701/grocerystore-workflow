@@ -852,6 +852,12 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     sender = update.effective_user.first_name or "Owner"
     asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, text))
 
+    # ── Help shortcut — catch /help, \\help, //help, "help" etc ─────────────
+    clean = text.lstrip("/\\").lower().strip()
+    if clean in ("help", "help me", "what can you do", "features"):
+        await cmd_help(update, context)
+        return
+
     # ── Priority 1: pending daily sheet ─────────────────────────────────────
     sales = await get_state(settings.store_id, _STATE_SALES)
     if sales:
