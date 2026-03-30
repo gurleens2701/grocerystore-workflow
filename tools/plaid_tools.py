@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 _ENV_MAP = {
     "sandbox":     plaid.Environment.Sandbox,
-    "development": plaid.Environment.Development,
+    "development": plaid.Environment.Sandbox,   # plaid-python v10+ removed Development
     "production":  plaid.Environment.Production,
 }
 
