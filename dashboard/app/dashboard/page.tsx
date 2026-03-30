@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import AuthGuard from '@/components/AuthGuard'
-import { api } from '@/lib/api'
+import { api, getActiveStore } from '@/lib/api'
 
 type Dept = { name: string; sales: number; items?: number }
 
@@ -26,6 +26,28 @@ type Sale = {
 
 function fmt(n: number) {
   return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+function currentMonth() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
+
+function monthLabel(ym: string) {
+  const [y, m] = ym.split('-').map(Number)
+  return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+}
+
+function prevMonth(ym: string) {
+  const [y, m] = ym.split('-').map(Number)
+  const d = new Date(y, m - 2, 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+function nextMonth(ym: string) {
+  const [y, m] = ym.split('-').map(Number)
+  const d = new Date(y, m, 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
 function ExpandedRow({ row }: { row: Sale }) {
@@ -115,20 +137,27 @@ function ExpandedRow({ row }: { row: Sale }) {
 }
 
 export default function DashboardPage() {
-  const [sales, setSales] = useState<Sale[]>([])
+  const [sales, setSales]     = useState<Sale[]>([])
   const [loading, setLoading] = useState(true)
-  const [days, setDays] = useState(7)
+  const [month, setMonth]     = useState(currentMonth)
   const [expanded, setExpanded] = useState<string | null>(null)
 
   useEffect(() => {
     setLoading(true)
-    api.sales(days).then(data => {
-      setSales(data || [])
-      setLoading(false)
+    setExpanded(null)
+    const sid = getActiveStore()
+    const params = new URLSearchParams({ month })
+    if (sid) params.set('store_id', sid)
+    fetch(`/api/ledger/sales?${params}`, {
+      headers: { Authorization: `Bearer ${document.cookie.match(/token=([^;]+)/)?.[1] || ''}` },
     })
-  }, [days])
+      .then(r => r.json())
+      .then(data => { setSales(Array.isArray(data) ? data : []); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [month])
 
   const totalSales = sales.reduce((s, r) => s + r.grand_total, 0)
+  const isCurrentMonth = month === currentMonth()
 
   function toggle(date: string) {
     setExpanded(prev => prev === date ? null : date)
@@ -139,15 +168,24 @@ export default function DashboardPage() {
       <div className="p-6">
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-xl font-bold">Daily Sales</h1>
-          <select
-            value={days}
-            onChange={e => setDays(Number(e.target.value))}
-            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
-          >
-            <option value={7}>Last 7 days</option>
-            <option value={14}>Last 14 days</option>
-            <option value={30}>Last 30 days</option>
-          </select>
+
+          {/* Month navigator */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setMonth(prevMonth)}
+              className="px-3 py-1.5 rounded-lg border border-gray-300 text-sm hover:bg-gray-50 transition"
+            >
+              ‹
+            </button>
+            <span className="text-sm font-medium w-36 text-center">{monthLabel(month)}</span>
+            <button
+              onClick={() => setMonth(nextMonth)}
+              disabled={isCurrentMonth}
+              className="px-3 py-1.5 rounded-lg border border-gray-300 text-sm hover:bg-gray-50 transition disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              ›
+            </button>
+          </div>
         </div>
 
         {/* Summary cards */}
@@ -186,7 +224,7 @@ export default function DashboardPage() {
               {loading ? (
                 <tr><td colSpan={7} className="text-center py-8 text-gray-400">Loading...</td></tr>
               ) : sales.length === 0 ? (
-                <tr><td colSpan={7} className="text-center py-8 text-gray-400">No sales data yet</td></tr>
+                <tr><td colSpan={7} className="text-center py-8 text-gray-400">No sales data for {monthLabel(month)}</td></tr>
               ) : sales.map(row => (
                 <>
                   <tr
