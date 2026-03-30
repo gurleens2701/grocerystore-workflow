@@ -16,9 +16,15 @@ type Sale = {
   grand_total: number
   cash_drop: number
   card: number
+  check_amount: number
   lotto_po: number
   lotto_cr: number
+  atm: number
+  pull_tab: number
+  coupon: number
   food_stamp: number
+  loyalty: number
+  vendor_payout: number
   total_transactions: number
   over_short: number | null
   departments: Dept[]
@@ -50,83 +56,97 @@ function nextMonth(ym: string) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
+function Row({ label, value, bold }: { label: string; value: number | null | undefined; bold?: boolean }) {
+  const display = value == null || value === 0 ? <span className="text-gray-300">—</span> : fmt(value)
+  return (
+    <div className={`flex justify-between ${bold ? 'font-semibold text-gray-800' : ''}`}>
+      <span className="text-gray-500">{label}</span>
+      <span>{display}</span>
+    </div>
+  )
+}
+
 function ExpandedRow({ row }: { row: Sale }) {
-  const depts = (row.departments || []).filter(d => d.name !== 'TOTAL').sort((a, b) => b.sales - a.sales)
+  const depts = (row.departments || []).filter(d => d.name !== 'TOTAL' && d.sales > 0).sort((a, b) => b.sales - a.sales)
+  const deptTotal = depts.reduce((s, d) => s + d.sales, 0)
+
+  const rightTotal = (row.cash_drop || 0) + (row.card || 0) + (row.check_amount || 0)
+    + (row.lotto_po || 0) + (row.lotto_cr || 0) + (row.atm || 0)
+    + (row.pull_tab || 0) + (row.coupon || 0) + (row.food_stamp || 0)
+    + (row.loyalty || 0) + (row.vendor_payout || 0)
 
   return (
     <tr className="bg-blue-50">
       <td colSpan={7} className="px-6 py-4">
-        <div className="grid grid-cols-2 gap-6 text-sm">
+        <div className="grid grid-cols-2 gap-8 text-sm">
 
-          {/* Left — department breakdown */}
-          <div>
-            <div className="font-semibold text-gray-700 mb-2 uppercase tracking-wide text-xs">Sales by Department</div>
-            <div className="space-y-1">
-              {depts.length === 0 ? (
-                <div className="text-gray-400 text-xs">No department data</div>
-              ) : depts.map(d => (
+          {/* LEFT — departments + other + grand total */}
+          <div className="space-y-1">
+            <div className="font-semibold text-gray-700 mb-2 uppercase tracking-wide text-xs">Left Side</div>
+
+            {/* Departments */}
+            {depts.length === 0
+              ? <div className="text-gray-400 text-xs">No department data</div>
+              : depts.map(d => (
                 <div key={d.name} className="flex justify-between">
                   <span className="text-gray-500 capitalize">{d.name.toLowerCase()}</span>
-                  <span className="font-medium">{fmt(d.sales)}</span>
+                  <span>{fmt(d.sales)}</span>
                 </div>
-              ))}
-              <div className="flex justify-between border-t pt-1 mt-1">
-                <span className="text-gray-500">Lotto In</span>
-                <span>{fmt(row.lotto_in)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Lotto Online</span>
-                <span>{fmt(row.lotto_online)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Sales Tax</span>
-                <span>{fmt(row.sales_tax)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">GPI</span>
-                <span>{fmt(row.gpi)}</span>
-              </div>
-              <div className="flex justify-between border-t pt-1 mt-1 font-semibold">
-                <span className="text-gray-700">Grand Total</span>
-                <span>{fmt(row.grand_total)}</span>
-              </div>
+              ))
+            }
+
+            {/* Dept subtotal */}
+            <div className="flex justify-between border-t pt-1 mt-1 font-semibold text-gray-700">
+              <span>Product Sales Total</span>
+              <span>{fmt(deptTotal || row.product_sales)}</span>
+            </div>
+
+            {/* Other items */}
+            <div className="pt-1 space-y-1">
+              <Row label="Lotto In"     value={row.lotto_in} />
+              <Row label="Lotto Online" value={row.lotto_online} />
+              <Row label="Sales Tax"    value={row.sales_tax} />
+              <Row label="GPI"          value={row.gpi} />
+            </div>
+
+            {/* Grand total */}
+            <div className="flex justify-between border-t pt-1 mt-1 font-bold text-gray-900 text-base">
+              <span>Grand Total</span>
+              <span>{fmt(row.grand_total)}</span>
             </div>
           </div>
 
-          {/* Right — payments */}
-          <div>
-            <div className="font-semibold text-gray-700 mb-2 uppercase tracking-wide text-xs">Payments</div>
-            <div className="space-y-1">
-              <div className="flex justify-between">
-                <span className="text-gray-500">Cash Drop</span>
-                <span>{fmt(row.cash_drop)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Credit/Debit</span>
-                <span>{fmt(row.card)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Lotto P.O.</span>
-                <span>{row.lotto_po ? fmt(row.lotto_po) : <span className="text-gray-300">—</span>}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Lotto CR.</span>
-                <span>{row.lotto_cr ? fmt(row.lotto_cr) : <span className="text-gray-300">—</span>}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Food Stamp</span>
-                <span>{row.food_stamp ? fmt(row.food_stamp) : <span className="text-gray-300">—</span>}</span>
-              </div>
-              <div className="flex justify-between border-t pt-1 mt-1 font-semibold">
-                <span className="text-gray-700">Over / Short</span>
-                <span className={
-                  row.over_short === null ? 'text-gray-300' :
-                  row.over_short >= 0 ? 'text-green-600' : 'text-red-500'
-                }>
-                  {row.over_short === null ? '—' :
-                    `${row.over_short >= 0 ? '+' : ''}${fmt(row.over_short)}`}
-                </span>
-              </div>
+          {/* RIGHT — payments + total + over/short */}
+          <div className="space-y-1">
+            <div className="font-semibold text-gray-700 mb-2 uppercase tracking-wide text-xs">Right Side</div>
+
+            <Row label="Cash Drop"    value={row.cash_drop} />
+            <Row label="C. Card"      value={row.card} />
+            <Row label="Check"        value={row.check_amount} />
+            <Row label="Lotto P.O."   value={row.lotto_po} />
+            <Row label="Lotto CR."    value={row.lotto_cr} />
+            <Row label="ATM"          value={row.atm} />
+            <Row label="Pull Tab"     value={row.pull_tab} />
+            <Row label="Coupon"       value={row.coupon} />
+            <Row label="Food Stamp"   value={row.food_stamp} />
+            <Row label="Loyalty"      value={row.loyalty} />
+            <Row label="Vendor Payout" value={row.vendor_payout} />
+
+            {/* Right total */}
+            <div className="flex justify-between border-t pt-1 mt-1 font-bold text-gray-900 text-base">
+              <span>Right Total</span>
+              <span>{fmt(rightTotal)}</span>
+            </div>
+
+            {/* Over / Short */}
+            <div className="flex justify-between pt-1 font-semibold">
+              <span className="text-gray-700">Over / Short</span>
+              <span className={
+                row.over_short === null ? 'text-gray-300' :
+                row.over_short >= 0 ? 'text-green-600' : 'text-red-500'
+              }>
+                {row.over_short === null ? '—' : `${row.over_short >= 0 ? '+' : ''}${fmt(row.over_short)}`}
+              </span>
             </div>
           </div>
 
