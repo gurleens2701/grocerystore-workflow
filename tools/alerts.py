@@ -63,6 +63,10 @@ async def check_new_expenses(store_id: str, today: date) -> list[str]:
         )
         last_month_cats = {r[0] for r in last_month_result.all()}
 
+    # Only alert if last month actually had data — avoid false positives on new stores
+    if not last_month_cats:
+        return []
+
     new_cats = this_month_cats - last_month_cats
     for cat in sorted(new_cats):
         alerts.append(f"⚠️ *New expense category* not seen last month: *{cat}*")
