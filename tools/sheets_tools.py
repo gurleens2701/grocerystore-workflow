@@ -493,9 +493,9 @@ def log_daily_sales(sales_data: dict[str, Any]) -> str:
 # COGS / Invoice logging
 # ---------------------------------------------------------------------------
 
-def resolve_vendor(name: str) -> str | None:
-    """Resolve a vendor alias/name to the exact column name. Returns None if not found."""
-    return VENDOR_ALIAS_MAP.get(name.lower().strip())
+def resolve_vendor(name: str) -> str:
+    """Resolve a vendor alias/name to the exact column name. Returns uppercased raw name if not found."""
+    return VENDOR_ALIAS_MAP.get(name.lower().strip(), name.upper().strip())
 
 
 def log_cogs_entry(
@@ -509,7 +509,7 @@ def log_cogs_entry(
         entry_date = date.today()
 
     exact_vendor = resolve_vendor(vendor)
-    if not exact_vendor or exact_vendor == "DATE" or exact_vendor == "TOTAL":
+    if exact_vendor not in _VENDOR_COL_INDEX or exact_vendor in ("DATE", "TOTAL"):
         # Unknown vendor — log to a notes column at the end
         col_idx = len(COGS_VENDOR_COLS) + 1
         label = vendor
@@ -535,7 +535,7 @@ def mark_invoice_paid(vendor: str, entry_date: date) -> str:
     If the vendor isn't found in the sheet, silently returns.
     """
     exact_vendor = resolve_vendor(vendor)
-    if not exact_vendor or exact_vendor in ("DATE", "TOTAL"):
+    if exact_vendor not in _VENDOR_COL_INDEX or exact_vendor in ("DATE", "TOTAL"):
         return f"Vendor {vendor!r} not in COGS columns — skipped paid mark"
 
     col_idx = _VENDOR_COL_INDEX[exact_vendor]

@@ -105,9 +105,8 @@ async def check_missing_expenses(store_id: str, today: date) -> list[str]:
         this_month_cats = {r[0] for r in this_month_result.all()}
 
     missing = last_month_cats - this_month_cats
-    # Only flag high-priority recurring expenses
-    recurring = {"RENT", "ELECTRICITY", "INSURANCE", "NRS", "SPECTRUM", "GARBAGE"}
-    for cat in sorted(missing & recurring):
+    # Flag all categories that were present last month but missing this month
+    for cat in sorted(missing):
         alerts.append(f"⚠️ *Missing expense* expected this month: *{cat}* (was logged last month)")
 
     return alerts

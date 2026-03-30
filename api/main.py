@@ -896,6 +896,72 @@ async def ledger_delete_rebate(
     return {"deleted": reb_id}
 
 
+# ---------------------------------------------------------------------------
+# Ledger suggestions (dynamic distinct values from DB)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ledger/suggestions/vendors")
+async def ledger_suggest_vendors(
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    sid = resolve_store(store_id, user)
+    async with get_session_for_store(sid) as session:
+        result = await session.execute(
+            select(Invoice.vendor).distinct().where(Invoice.store_id == sid).order_by(Invoice.vendor)
+        )
+        return sorted({r[0] for r in result.all() if r[0]})
+
+
+@app.get("/api/ledger/suggestions/expenses")
+async def ledger_suggest_expenses(
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    sid = resolve_store(store_id, user)
+    async with get_session_for_store(sid) as session:
+        result = await session.execute(
+            select(Expense.category).distinct().where(
+                and_(Expense.store_id == sid, ~Expense.category.ilike("PAYROLL%"))
+            ).order_by(Expense.category)
+        )
+        return sorted({r[0] for r in result.all() if r[0]})
+
+
+@app.get("/api/ledger/suggestions/employees")
+async def ledger_suggest_employees(
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    sid = resolve_store(store_id, user)
+    async with get_session_for_store(sid) as session:
+        result = await session.execute(
+            select(Expense.category).distinct().where(
+                and_(Expense.store_id == sid, Expense.category.ilike("PAYROLL%"))
+            )
+        )
+        names = set()
+        for (cat,) in result.all():
+            if cat:
+                name = cat.replace("PAYROLL_", "").replace("PAYROLL-", "").replace("PAYROLL:", "").strip()
+                if name:
+                    names.add(name)
+        return sorted(names)
+
+
+@app.get("/api/ledger/suggestions/rebates")
+async def ledger_suggest_rebates(
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    sid = resolve_store(store_id, user)
+    async with get_session_for_store(sid) as session:
+        result = await session.execute(
+            select(Rebate.vendor).distinct().where(Rebate.store_id == sid).order_by(Rebate.vendor)
+        )
+        return sorted({r[0] for r in result.all() if r[0]})
+
+
 class DailyReportSubmit(BaseModel):
     date: str
     product_sales: float = 0

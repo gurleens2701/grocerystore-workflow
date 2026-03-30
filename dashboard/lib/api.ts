@@ -201,6 +201,22 @@ export const api = {
       const sid = storeId || getActiveStore()
       return request(`/ledger/rebates/${id}${sid ? `?store_id=${sid}` : ''}`, { method: 'DELETE' })
     },
+    suggestVendors: (storeId?: string) => {
+      const sid = storeId || getActiveStore()
+      return request(`/ledger/suggestions/vendors${sid ? `?store_id=${sid}` : ''}`)
+    },
+    suggestExpenses: (storeId?: string) => {
+      const sid = storeId || getActiveStore()
+      return request(`/ledger/suggestions/expenses${sid ? `?store_id=${sid}` : ''}`)
+    },
+    suggestEmployees: (storeId?: string) => {
+      const sid = storeId || getActiveStore()
+      return request(`/ledger/suggestions/employees${sid ? `?store_id=${sid}` : ''}`)
+    },
+    suggestRebates: (storeId?: string) => {
+      const sid = storeId || getActiveStore()
+      return request(`/ledger/suggestions/rebates${sid ? `?store_id=${sid}` : ''}`)
+    },
   },
 
   daily: {

@@ -5,27 +5,6 @@ import { api } from '@/lib/api'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const INVOICE_VENDORS = [
-  'ACE UNLIMITED', 'HD DISTRIBUTION', 'PIZZAHUNT', 'HERSHEY', 'MCLANE',
-  'HEIDELBURG', 'ROMA WHOLESALE', 'CORE-MARK', 'PEPSI', 'REDBULL',
-  'COCA COLA', '7UP', 'BUDWEISER', 'MILLER', 'COORS', 'MODELO', 'HEINEKEN',
-]
-
-const EXPENSE_CATEGORIES = [
-  'NRS', 'ELECTRICITY', 'GARBAGE', 'LAWYER', 'ABT', 'MAINTENANCE',
-  'TAXES', 'GRASSCUT', 'UTILITIES', 'INSURANCE', 'RENT', 'R.PATEL',
-  'VECTOR', 'PEST CONTROL', 'SPECTRUM', 'INVENTORY',
-]
-
-const PAYROLL_EMPLOYEES = [
-  'SIMMT', 'ARMAAN', 'KARAN', 'YOGESH', 'UGAIN', 'ANUSHA', 'KRISHALA',
-]
-
-const REBATE_VENDORS = [
-  'USSMOKE', 'PMHELIX', 'ALG', 'LIGGET', 'ITG', 'NDA', 'ATMUAIR',
-  'COREM', 'JC&CO', 'REYNOLD', 'INMAR', 'BITCOIN', 'MISCELLANEOUS', 'LOTTO',
-]
-
 const DAILY_SALES_COLS: { key: string; label: string; auto?: boolean }[] = [
   { key: 'product_sales', label: 'Product Sales', auto: true },
   { key: 'lotto_in', label: 'Lotto In', auto: true },
@@ -238,9 +217,33 @@ type LedgerRow = { id: number; date: string; amount: number } & Record<string, s
 interface ListTabProps {
   rows: LedgerRow[]
   loading: boolean
-  columns: { key: string; label: string; type: 'text' | 'select' | 'date' | 'amount'; options?: string[] }[]
+  columns: { key: string; label: string; type: 'text' | 'combo' | 'date' | 'amount'; options?: string[] }[]
   onAdd: (row: Record<string, string | number>) => Promise<void>
   onDelete: (id: number) => Promise<void>
+}
+
+// ComboInput: text input with datalist suggestions (accepts any value + shows known ones)
+function ComboInput({
+  id, value, options, label, onChange,
+}: {
+  id: string; value: string; options: string[]; label: string
+  onChange: (v: string) => void
+}) {
+  const listId = `combo-${id}`
+  return (
+    <>
+      <input
+        list={listId}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={label}
+        className="border border-gray-300 rounded px-2 py-1 text-sm w-full focus:outline-none focus:ring-1 focus:ring-blue-400"
+      />
+      <datalist id={listId}>
+        {options.map(o => <option key={o} value={o} />)}
+      </datalist>
+    </>
+  )
 }
 
 function ListTab({ rows, loading, columns, onAdd, onDelete }: ListTabProps) {
@@ -253,7 +256,6 @@ function ListTab({ rows, loading, columns, onAdd, onDelete }: ListTabProps) {
     const d: Record<string, string> = {}
     columns.forEach(c => {
       if (c.type === 'date') d[c.key] = todayISO()
-      else if (c.type === 'select' && c.options?.length) d[c.key] = c.options[0]
       else d[c.key] = ''
     })
     return d
@@ -346,14 +348,14 @@ function ListTab({ rows, loading, columns, onAdd, onDelete }: ListTabProps) {
                   <tr className="bg-blue-50">
                     {columns.map(c => (
                       <td key={c.key} className="px-4 py-1.5">
-                        {c.type === 'select' ? (
-                          <select
+                        {c.type === 'combo' ? (
+                          <ComboInput
+                            id={`${c.key}-new`}
                             value={draft[c.key] || ''}
-                            onChange={e => setDraft(prev => ({ ...prev, [c.key]: e.target.value }))}
-                            className="border border-gray-300 rounded px-2 py-1 text-sm w-full focus:outline-none focus:ring-1 focus:ring-blue-400"
-                          >
-                            {c.options?.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
+                            options={c.options || []}
+                            label={c.label}
+                            onChange={v => setDraft(prev => ({ ...prev, [c.key]: v }))}
+                          />
                         ) : (
                           <input
                             type={c.type === 'amount' ? 'number' : c.type === 'date' ? 'date' : 'text'}
@@ -403,6 +405,11 @@ function ListTab({ rows, loading, columns, onAdd, onDelete }: ListTabProps) {
 function InvoicesTab({ month }: { month: string }) {
   const [rows, setRows] = useState<LedgerRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+
+  useEffect(() => {
+    api.ledger.suggestVendors().then((d: string[] | null) => setSuggestions(d || []))
+  }, [])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -416,7 +423,11 @@ function InvoicesTab({ month }: { month: string }) {
 
   async function handleAdd(payload: Record<string, string | number>) {
     const res = await api.ledger.putInvoice(payload as any)
-    if (res) load()
+    if (res) {
+      load()
+      // Refresh suggestions in case new vendor was added
+      api.ledger.suggestVendors().then((d: string[] | null) => setSuggestions(d || []))
+    }
   }
 
   async function handleDelete(id: number) {
@@ -430,7 +441,7 @@ function InvoicesTab({ month }: { month: string }) {
       loading={loading}
       columns={[
         { key: 'date', label: 'Date', type: 'date' },
-        { key: 'vendor', label: 'Vendor', type: 'select', options: INVOICE_VENDORS },
+        { key: 'vendor', label: 'Vendor', type: 'combo', options: suggestions },
         { key: 'amount', label: 'Amount', type: 'amount' },
       ]}
       onAdd={handleAdd}
@@ -444,6 +455,11 @@ function InvoicesTab({ month }: { month: string }) {
 function ExpensesTab({ month }: { month: string }) {
   const [rows, setRows] = useState<LedgerRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+
+  useEffect(() => {
+    api.ledger.suggestExpenses().then((d: string[] | null) => setSuggestions(d || []))
+  }, [])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -457,7 +473,10 @@ function ExpensesTab({ month }: { month: string }) {
 
   async function handleAdd(payload: Record<string, string | number>) {
     const res = await api.ledger.putExpense(payload as any)
-    if (res) load()
+    if (res) {
+      load()
+      api.ledger.suggestExpenses().then((d: string[] | null) => setSuggestions(d || []))
+    }
   }
 
   async function handleDelete(id: number) {
@@ -471,7 +490,7 @@ function ExpensesTab({ month }: { month: string }) {
       loading={loading}
       columns={[
         { key: 'date', label: 'Date', type: 'date' },
-        { key: 'category', label: 'Category', type: 'select', options: EXPENSE_CATEGORIES },
+        { key: 'category', label: 'Category', type: 'combo', options: suggestions },
         { key: 'amount', label: 'Amount', type: 'amount' },
       ]}
       onAdd={handleAdd}
@@ -485,6 +504,11 @@ function ExpensesTab({ month }: { month: string }) {
 function PayrollTab({ month }: { month: string }) {
   const [rows, setRows] = useState<LedgerRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+
+  useEffect(() => {
+    api.ledger.suggestEmployees().then((d: string[] | null) => setSuggestions(d || []))
+  }, [])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -498,7 +522,10 @@ function PayrollTab({ month }: { month: string }) {
 
   async function handleAdd(payload: Record<string, string | number>) {
     const res = await api.ledger.putPayroll(payload as any)
-    if (res) load()
+    if (res) {
+      load()
+      api.ledger.suggestEmployees().then((d: string[] | null) => setSuggestions(d || []))
+    }
   }
 
   async function handleDelete(id: number) {
@@ -512,7 +539,7 @@ function PayrollTab({ month }: { month: string }) {
       loading={loading}
       columns={[
         { key: 'date', label: 'Date', type: 'date' },
-        { key: 'employee', label: 'Employee', type: 'select', options: PAYROLL_EMPLOYEES },
+        { key: 'employee', label: 'Employee', type: 'combo', options: suggestions },
         { key: 'amount', label: 'Amount', type: 'amount' },
       ]}
       onAdd={handleAdd}
@@ -526,6 +553,11 @@ function PayrollTab({ month }: { month: string }) {
 function RebatesTab({ month }: { month: string }) {
   const [rows, setRows] = useState<LedgerRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+
+  useEffect(() => {
+    api.ledger.suggestRebates().then((d: string[] | null) => setSuggestions(d || []))
+  }, [])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -539,7 +571,10 @@ function RebatesTab({ month }: { month: string }) {
 
   async function handleAdd(payload: Record<string, string | number>) {
     const res = await api.ledger.putRebate(payload as any)
-    if (res) load()
+    if (res) {
+      load()
+      api.ledger.suggestRebates().then((d: string[] | null) => setSuggestions(d || []))
+    }
   }
 
   async function handleDelete(id: number) {
@@ -553,7 +588,7 @@ function RebatesTab({ month }: { month: string }) {
       loading={loading}
       columns={[
         { key: 'date', label: 'Date', type: 'date' },
-        { key: 'vendor', label: 'Vendor', type: 'select', options: REBATE_VENDORS },
+        { key: 'vendor', label: 'Vendor', type: 'combo', options: suggestions },
         { key: 'amount', label: 'Amount', type: 'amount' },
       ]}
       onAdd={handleAdd}
