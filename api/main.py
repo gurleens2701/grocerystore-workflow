@@ -416,6 +416,8 @@ def _sales_row_to_dict(r: DailySales) -> dict:
         "loyalty": float(r.loyalty or 0),
         "vendor_payout": float(r.vendor_payout or 0),
         "over_short": _calc_over_short(r),
+        "total_transactions": r.total_transactions or 0,
+        "departments": r.departments or [],
     }
 
 
