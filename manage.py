@@ -86,8 +86,6 @@ def _create_db(store_id: str) -> None:
     conn.close()
 
 def _run_migrations(store_id: str) -> None:
-    env = os.environ.copy()
-    env["STORE_ID"] = store_id
     result = subprocess.run(
         ["docker", "exec", "-e", f"STORE_ID={store_id}", "app-api-1",
          "alembic", "upgrade", "head"],
@@ -97,6 +95,25 @@ def _run_migrations(store_id: str) -> None:
         print(f"  ⚠ Migration warning: {result.stderr[-300:]}")
     else:
         print(f"  ✓ Migrations applied for {store_id}")
+
+def _start_store_bot(store_id: str) -> None:
+    result = subprocess.run(
+        ["docker", "compose", "up", "--build", "-d", f"app_{store_id}"],
+        capture_output=True, text=True, cwd=BASE_DIR
+    )
+    if result.returncode != 0:
+        print(f"  ⚠ Could not start bot: {result.stderr[-300:]}")
+    else:
+        print(f"  ✓ Bot started for {store_id}")
+
+def _get_service_account_email() -> str:
+    creds_path = os.path.join(BASE_DIR, "config", "google_credentials.json")
+    try:
+        import json
+        with open(creds_path) as f:
+            return json.load(f).get("client_email", "")
+    except Exception:
+        return ""
 
 def _write_store_env(store_id: str, data: dict) -> str:
     os.makedirs(STORES_DIR, exist_ok=True)
@@ -196,6 +213,12 @@ def cmd_add_store():
     chat_id   = _prompt_required("Telegram chat ID (send /start to @userinfobot to get it)")
 
     print("\n── Google Sheets ──────────────────────────────────────")
+    sa_email = _get_service_account_email()
+    if sa_email:
+        print(f"  ℹ Ask the store owner to:")
+        print(f"    1. Create a new Google Sheet")
+        print(f"    2. Share it (Editor access) with: {sa_email}")
+        print(f"    3. Copy the Sheet ID from the URL")
     sheet_id = _prompt("Google Sheet ID (leave blank to skip)", "")
 
     print("\n── Dashboard Login ────────────────────────────────────")
@@ -247,24 +270,30 @@ def cmd_add_store():
     try:
         _run_migrations(store_id)
     except Exception as e:
-        print(f"  ⚠ Migration failed (run manually on server): {e}")
+        print(f"  ⚠ Migration failed: {e}")
 
     # 4. Add to docker-compose
     _add_to_docker_compose(store_id)
+
+    # 5. Start the bot
+    print(f"  Starting bot for {store_id}...")
+    try:
+        _start_store_bot(store_id)
+    except Exception as e:
+        print(f"  ⚠ Bot start failed: {e}")
+        print(f"  Run manually: docker compose up --build -d app_{store_id}")
 
     print(f"""
 ── Done! ─────────────────────────────────────────────────────
 Store ID:   {store_id}
 Store Name: {store_name}
 
-Dashboard:
-  URL:      http://178.104.61.18/login
-  Username: {dash_user}
-  Password: {dash_pass}
+Give the store owner these credentials:
+  Dashboard URL: http://178.104.61.18/login
+  Username:      {dash_user}
+  Password:      {dash_pass}
 
-Next steps on the server:
-  git pull
-  docker compose up --build -d app_{store_id}
+Tell the store owner to message their Telegram bot to get started.
 ──────────────────────────────────────────────────────────────
 """)
 
