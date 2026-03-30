@@ -40,7 +40,7 @@ const STEPS = [
   {
     n: '1',
     title: 'You give us your store info',
-    desc: 'Store name, your NRS credentials, a Telegram bot token, and a Google Sheet. Takes 5 minutes.',
+    desc: 'Store name, your back office credentials, a Telegram bot token, and a Google Sheet. Takes 5 minutes.',
   },
   {
     n: '2',
@@ -108,7 +108,7 @@ export default function LandingPage() {
           Get Started — Message Us on Telegram
         </a>
         <p className="text-gray-600 text-sm mt-4">
-          Currently available for NRS Plus stores · More POS systems coming soon
+          Works with NRS, Modisoft, and manual stores · More POS systems added regularly
         </p>
       </section>
 
@@ -152,7 +152,7 @@ export default function LandingPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-4">
           {[
             ['📱', 'A Telegram account', 'Free — download from App Store or Google Play'],
-            ['🖥️', 'NRS Plus back office access', 'Your NRS username and password'],
+            ['🖥️', 'Back office access', 'Your POS back office username and password'],
             ['📄', 'A Google account', 'We create a Google Sheet for your daily records'],
             ['⏱️', '5 minutes', "That's all the setup takes"],
           ].map(([icon, title, sub], i) => (
