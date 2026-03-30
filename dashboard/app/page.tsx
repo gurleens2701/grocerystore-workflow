@@ -100,7 +100,7 @@ export default function LandingPage() {
           No spreadsheets. No manual entry.
         </p>
         <a
-          href="https://t.me/gurleens2701"
+          href="https://t.me/gurleensingh12"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-block px-8 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold text-lg transition-colors"
@@ -174,7 +174,7 @@ export default function LandingPage() {
           Message us on Telegram and we will have your store running in under an hour.
         </p>
         <a
-          href="https://t.me/gurleens2701"
+          href="https://t.me/gurleensingh12"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-block px-8 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold text-lg transition-colors"
