@@ -529,6 +529,31 @@ def log_cogs_entry(
     return f"COGS logged: {label} ${amount:.2f} on {entry_date} → {_month_tab_name(entry_date)}"
 
 
+def mark_invoice_paid(vendor: str, entry_date: date) -> str:
+    """
+    Turn the COGS cell for this vendor+date green to indicate the bank confirmed payment.
+    If the vendor isn't found in the sheet, silently returns.
+    """
+    exact_vendor = resolve_vendor(vendor)
+    if not exact_vendor or exact_vendor in ("DATE", "TOTAL"):
+        return f"Vendor {vendor!r} not in COGS columns — skipped paid mark"
+
+    col_idx = _VENDOR_COL_INDEX[exact_vendor]
+    target_row = _COGS_DATA_START + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+
+    client = _get_client()
+    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+
+    # Green background = bank confirmed payment
+    sheet.format(cell, {
+        "backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}  # soft green
+    })
+
+    return f"Marked PAID: {exact_vendor} on {entry_date} (cell {cell} → green)"
+
+
 # ---------------------------------------------------------------------------
 # Expense logging
 # ---------------------------------------------------------------------------
@@ -593,6 +618,42 @@ def log_expense(category: str, amount: float, entry_date: date | None = None) ->
     sheet.update(cell, [[amount]])
 
     return f"Expense logged: {col_name} ${amount:.2f} on {entry_date}"
+
+
+# ---------------------------------------------------------------------------
+# Payroll logging
+# ---------------------------------------------------------------------------
+
+# Map lowercase name/alias → exact PAYROLL_HEADERS column name
+_PAYROLL_COL_MAP: dict[str, str] = {h.lower(): h for h in PAYROLL_HEADERS if h not in ("DATE", "TOTAL")}
+
+
+def resolve_payroll_name(name: str) -> str | None:
+    return _PAYROLL_COL_MAP.get(name.lower().strip())
+
+
+def log_payroll(employee: str, amount: float, entry_date: date | None = None) -> str:
+    """Log a payroll payment to the PAYROLL section of the monthly sheet."""
+    if entry_date is None:
+        entry_date = date.today()
+
+    col_name = resolve_payroll_name(employee)
+    if not col_name:
+        return f"⚠️ Employee '{employee}' not found in payroll. Known names: {', '.join(h for h in PAYROLL_HEADERS if h not in ('DATE', 'TOTAL'))}"
+
+    # col index within PAYROLL_HEADERS (0-based) → absolute sheet column (1-based)
+    local_idx = PAYROLL_HEADERS.index(col_name)
+    col_idx = _PAYROLL_COL_START + local_idx
+
+    client = _get_client()
+    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+
+    target_row = _EXP_DATA_START + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+    sheet.update(cell, [[amount]])
+
+    return f"Payroll logged: {col_name} ${amount:.2f} on {entry_date}"
 
 
 # ---------------------------------------------------------------------------

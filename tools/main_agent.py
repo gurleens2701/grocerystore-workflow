@@ -269,34 +269,49 @@ def query_prices(product: str) -> str:
 @tool
 def log_expense(category: str, amount: float, date_str: str = "") -> str:
     """
-    Log an expense to the database and Google Sheets.
+    Log or update an expense to the database and Google Sheets.
+    If an expense for the same category already exists on that date, it will be updated.
     category: type of expense (electricity, rent, garbage, maintenance, etc.)
     amount: dollar amount
     date_str: optional date — M/D, M/D/YYYY, YYYY-MM-DD, or month name like 'march'. Defaults to today.
     """
     entry_date = _parse_date(date_str)
+    cat = category.upper()
     with get_sync_session() as session:
-        row = Expense(
-            store_id=settings.store_id,
-            expense_date=entry_date,
-            category=category.upper(),
-            amount=Decimal(str(amount)),
-            last_updated_by="bot",
-        )
-        session.add(row)
+        existing = session.execute(
+            select(Expense).where(and_(
+                Expense.store_id == settings.store_id,
+                Expense.expense_date == entry_date,
+                Expense.category == cat,
+            ))
+        ).scalar_one_or_none()
+        if existing:
+            existing.amount = Decimal(str(amount))
+            existing.last_updated_by = "bot"
+            action = "Updated"
+        else:
+            session.add(Expense(
+                store_id=settings.store_id,
+                expense_date=entry_date,
+                category=cat,
+                amount=Decimal(str(amount)),
+                last_updated_by="bot",
+            ))
+            action = "Logged"
 
     try:
         sheets_tools.log_expense(category, amount, entry_date)
     except Exception as e:
-        return f"Logged expense to DB: {category} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+        return f"{action} expense in DB: {cat} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
-    return f"Logged expense: {category} ${amount:.2f} on {entry_date}"
+    return f"{action} expense: {cat} ${amount:.2f} on {entry_date}"
 
 
 @tool
 def log_invoice(vendor: str, amount: float, date_str: str = "") -> str:
     """
-    Log a vendor invoice (COGS/inventory purchase) to the database and Google Sheets.
+    Log or update a vendor invoice (COGS/inventory purchase) to the database and Google Sheets.
+    If an invoice from the same vendor already exists on that date, it will be updated.
     vendor: vendor name (Pepsi, McLane, Heidelburg, Roma Wholesale, Coca Cola, Red Bull, Glazer, Ohio Eagle, etc.)
     amount: dollar amount of invoice
     date_str: optional date — M/D, M/D/YYYY, YYYY-MM-DD, or month name like 'march'. Defaults to today.
@@ -306,7 +321,6 @@ def log_invoice(vendor: str, amount: float, date_str: str = "") -> str:
     # Resolve vendor name against the known alias map
     resolved = resolve_vendor(vendor)
     if resolved is None:
-        # Try resolving each word individually (handles "Ohio Eagle" → "OHIO EAGLE" etc.)
         for word in vendor.strip().split():
             resolved = resolve_vendor(word)
             if resolved:
@@ -322,77 +336,235 @@ def log_invoice(vendor: str, amount: float, date_str: str = "") -> str:
         return f"Vendor '{vendor}' not found. Known vendors: {known}."
 
     with get_sync_session() as session:
-        row = Invoice(
-            store_id=settings.store_id,
-            vendor=resolved,
-            amount=Decimal(str(amount)),
-            invoice_date=entry_date,
-            last_updated_by="bot",
-        )
-        session.add(row)
+        existing = session.execute(
+            select(Invoice).where(and_(
+                Invoice.store_id == settings.store_id,
+                Invoice.invoice_date == entry_date,
+                Invoice.vendor == resolved,
+            ))
+        ).scalar_one_or_none()
+        if existing:
+            existing.amount = Decimal(str(amount))
+            existing.last_updated_by = "bot"
+            action = "Updated"
+        else:
+            session.add(Invoice(
+                store_id=settings.store_id,
+                vendor=resolved,
+                amount=Decimal(str(amount)),
+                invoice_date=entry_date,
+                last_updated_by="bot",
+            ))
+            action = "Logged"
 
     try:
         sheets_tools.log_cogs_entry(vendor=resolved, amount=amount, entry_date=entry_date)
     except Exception as e:
-        return f"Logged invoice to DB: {resolved} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+        return f"{action} invoice in DB: {resolved} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
-    return f"Logged invoice: {resolved} ${amount:.2f} on {entry_date}"
+    return f"{action} invoice: {resolved} ${amount:.2f} on {entry_date}"
 
 
 @tool
 def log_rebate(vendor: str, amount: float, date_str: str = "") -> str:
     """
-    Log a vendor rebate to the database and Google Sheets.
+    Log or update a vendor rebate to the database and Google Sheets.
+    If a rebate from the same vendor already exists on that date, it will be updated.
     vendor: rebate source (USSmoke, PMHelix, Altria, ALG, Liggett, ITG, NDA, Coremark, Reynolds, Inmar, etc.)
     amount: dollar amount of rebate
     date_str: optional date — M/D, M/D/YYYY, YYYY-MM-DD, or month name like 'march'. Defaults to today.
     """
     entry_date = _parse_date(date_str)
+    v = vendor.upper()
 
     with get_sync_session() as session:
-        row = Rebate(
-            store_id=settings.store_id,
-            rebate_date=entry_date,
-            vendor=vendor.upper(),
-            amount=Decimal(str(amount)),
-            last_updated_by="bot",
-        )
-        session.add(row)
+        existing = session.execute(
+            select(Rebate).where(and_(
+                Rebate.store_id == settings.store_id,
+                Rebate.rebate_date == entry_date,
+                Rebate.vendor == v,
+            ))
+        ).scalar_one_or_none()
+        if existing:
+            existing.amount = Decimal(str(amount))
+            existing.last_updated_by = "bot"
+            action = "Updated"
+        else:
+            session.add(Rebate(
+                store_id=settings.store_id,
+                rebate_date=entry_date,
+                vendor=v,
+                amount=Decimal(str(amount)),
+                last_updated_by="bot",
+            ))
+            action = "Logged"
 
     try:
         sheets_tools.log_rebate(vendor, amount, entry_date)
     except Exception as e:
-        return f"Logged rebate to DB: {vendor} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+        return f"{action} rebate in DB: {v} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
-    return f"Logged rebate: {vendor} ${amount:.2f} on {entry_date}"
+    return f"{action} rebate: {v} ${amount:.2f} on {entry_date}"
+
+
+@tool
+def log_payroll(employee: str, amount: float, date_str: str = "") -> str:
+    """
+    Log or update a payroll payment for an employee to the database and Google Sheets.
+    If a payroll entry for the same employee already exists on that date, it will be updated.
+    employee: employee name — Simmt, Armaan, Karan, Yogesh, Ugain, Anusha, Krishala
+    amount: dollar amount paid
+    date_str: optional date — M/D, M/D/YYYY, YYYY-MM-DD, or month name like 'march'. Defaults to today.
+    """
+    entry_date = _parse_date(date_str)
+    cat = f"PAYROLL - {employee.upper()}"
+
+    with get_sync_session() as session:
+        existing = session.execute(
+            select(Expense).where(and_(
+                Expense.store_id == settings.store_id,
+                Expense.expense_date == entry_date,
+                Expense.category == cat,
+            ))
+        ).scalar_one_or_none()
+        if existing:
+            existing.amount = Decimal(str(amount))
+            existing.last_updated_by = "bot"
+            action = "Updated"
+        else:
+            session.add(Expense(
+                store_id=settings.store_id,
+                expense_date=entry_date,
+                category=cat,
+                amount=Decimal(str(amount)),
+                notes=employee.capitalize(),
+                last_updated_by="bot",
+            ))
+            action = "Logged"
+
+    try:
+        sheets_tools.log_payroll(employee, amount, entry_date)
+    except Exception as e:
+        return f"{action} payroll in DB: {employee} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+
+    return f"{action} payroll: {employee} ${amount:.2f} on {entry_date}"
 
 
 @tool
 def log_revenue(category: str, amount: float, date_str: str = "") -> str:
     """
-    Log a revenue or profit-took-home entry to the database and Google Sheets.
+    Log or update a revenue or profit-took-home entry to the database and Google Sheets.
+    If a revenue entry for the same category already exists on that date, it will be updated.
     category: revenue category (committee, car payment, food, for house, taxable, extra)
     amount: dollar amount
     date_str: optional date — M/D, M/D/YYYY, YYYY-MM-DD, or month name like 'march'. Defaults to today.
     """
     entry_date = _parse_date(date_str)
+    cat = category.upper()
 
     with get_sync_session() as session:
-        row = Revenue(
-            store_id=settings.store_id,
-            revenue_date=entry_date,
-            category=category.upper(),
-            amount=Decimal(str(amount)),
-            last_updated_by="bot",
-        )
-        session.add(row)
+        existing = session.execute(
+            select(Revenue).where(and_(
+                Revenue.store_id == settings.store_id,
+                Revenue.revenue_date == entry_date,
+                Revenue.category == cat,
+            ))
+        ).scalar_one_or_none()
+        if existing:
+            existing.amount = Decimal(str(amount))
+            existing.last_updated_by = "bot"
+            action = "Updated"
+        else:
+            session.add(Revenue(
+                store_id=settings.store_id,
+                revenue_date=entry_date,
+                category=cat,
+                amount=Decimal(str(amount)),
+                last_updated_by="bot",
+            ))
+            action = "Logged"
 
     try:
         sheets_tools.log_revenue(category, amount, entry_date)
     except Exception as e:
-        return f"Logged revenue to DB: {category} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+        return f"{action} revenue in DB: {cat} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
-    return f"Logged revenue: {category} ${amount:.2f} on {entry_date}"
+    return f"{action} revenue: {cat} ${amount:.2f} on {entry_date}"
+
+
+@tool
+def log_daily_sales(
+    product_sales: float,
+    lotto_in: float = 0,
+    lotto_online: float = 0,
+    sales_tax: float = 0,
+    gpi: float = 0,
+    cash_drop: float = 0,
+    card: float = 0,
+    lotto_po: float = 0,
+    lotto_cr: float = 0,
+    food_stamp: float = 0,
+    date_str: str = "",
+) -> str:
+    """
+    Manually log or update daily sales numbers to the database and Google Sheets.
+    Use when NRS is down or the owner wants to enter/correct daily numbers by hand.
+    product_sales: total product/dept sales (the left-side TOTAL)
+    lotto_in: instant lottery sales
+    lotto_online: online lottery sales
+    sales_tax: sales tax collected
+    gpi: GPI / fee buster amount
+    cash_drop: cash dropped to safe
+    card: credit/debit card total
+    lotto_po: lottery payout (cash out to customers)
+    lotto_cr: lottery credit / net lottery
+    food_stamp: SNAP/food stamp amount
+    date_str: optional date, defaults to today
+    """
+    entry_date = _parse_date(date_str)
+    grand_total = product_sales + lotto_in + lotto_online + sales_tax + gpi
+
+    with get_sync_session() as session:
+        existing = session.execute(
+            select(DailySales).where(and_(
+                DailySales.store_id == settings.store_id,
+                DailySales.sale_date == entry_date,
+            ))
+        ).scalar_one_or_none()
+        if existing:
+            existing.product_sales = Decimal(str(product_sales))
+            existing.lotto_in = Decimal(str(lotto_in))
+            existing.lotto_online = Decimal(str(lotto_online))
+            existing.sales_tax = Decimal(str(sales_tax))
+            existing.gpi = Decimal(str(gpi))
+            existing.grand_total = Decimal(str(grand_total))
+            existing.cash_drop = Decimal(str(cash_drop))
+            existing.card = Decimal(str(card))
+            existing.lotto_po = Decimal(str(lotto_po))
+            existing.lotto_cr = Decimal(str(lotto_cr))
+            existing.food_stamp = Decimal(str(food_stamp))
+            existing.last_updated_by = "bot"
+            action = "Updated"
+        else:
+            session.add(DailySales(
+                store_id=settings.store_id,
+                sale_date=entry_date,
+                product_sales=Decimal(str(product_sales)),
+                lotto_in=Decimal(str(lotto_in)),
+                lotto_online=Decimal(str(lotto_online)),
+                sales_tax=Decimal(str(sales_tax)),
+                gpi=Decimal(str(gpi)),
+                grand_total=Decimal(str(grand_total)),
+                cash_drop=Decimal(str(cash_drop)),
+                card=Decimal(str(card)),
+                lotto_po=Decimal(str(lotto_po)),
+                lotto_cr=Decimal(str(lotto_cr)),
+                food_stamp=Decimal(str(food_stamp)),
+                last_updated_by="bot",
+            ))
+            action = "Logged"
+
+    return f"{action} daily sales for {entry_date}: product sales ${product_sales:.2f}, grand total ${grand_total:.2f}"
 
 
 @tool
@@ -429,8 +601,10 @@ _ALL_TOOLS = [
     # Write
     log_expense,
     log_invoice,
+    log_payroll,
     log_rebate,
     log_revenue,
+    log_daily_sales,
     sync_sheets_now,
 ]
 
@@ -448,7 +622,7 @@ You have two roles: (1) help the owner manage their store data, and (2) act as a
 The owner and staff may not speak perfect English. Understand what they mean even if misspelled or oddly phrased.
 
 COMMUNICATION RULES:
-- IMPORTANT: Always reply in the same language the user wrote or spoke in. If they write in Hindi, reply in Hindi. If Gujarati, reply in Gujarati. If English, reply in English. Never switch languages unless the user does.
+- LANGUAGE IS MANDATORY: Detect the language of the user's message and reply ONLY in that exact language. If Hindi → reply in Hindi (Devanagari script). If Gujarati → Gujarati. If Punjabi → Punjabi. If English → English. This is non-negotiable — never reply in English if the user wrote in another language. Never mix languages in a single reply.
 - Reply in plain conversational text. No markdown, no asterisks, no bold, no emojis, no bullet points.
 - Be warm and direct. Talk like a smart friend who knows business, not a robot.
 - Keep answers SHORT — 2 to 4 sentences normally. Give more only when analyzing data or giving advice.
@@ -471,7 +645,7 @@ BUSINESS ADVISOR ROLE:
 - If the owner asks something like "how can I make more money" or "what should I focus on", pull their recent data and give specific, actionable advice based on their actual numbers.
 - Keep business advice practical and specific to a small gas station convenience store owner — not generic corporate advice.
 
-Today is {today}. Store: {store_name}.\
+Today is {today}. Store: {store_name}.{owner_line}\
 """
 
 
@@ -479,7 +653,7 @@ Today is {today}. Store: {store_name}.\
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_agent(question: str, store_id: str) -> str:
+def run_agent(question: str, store_id: str, owner_name: str = "") -> str:
     """
     Handle any user message — reads from DB, writes to DB + Sheets, or just chats.
     Blocking — call via run_in_executor from async context.
@@ -492,10 +666,13 @@ def run_agent(question: str, store_id: str) -> str:
         api_key=settings.anthropic_api_key,
     ).bind_tools(_ALL_TOOLS)
 
+    owner_line = f" The owner's name is {owner_name} — use their name occasionally to be friendly." if owner_name else ""
+
     messages = [
         SystemMessage(content=_SYSTEM.format(
             today=date.today(),
             store_name=settings.store_name,
+            owner_line=owner_line,
         )),
         HumanMessage(content=question),
     ]

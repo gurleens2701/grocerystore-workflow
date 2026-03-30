@@ -5,10 +5,13 @@ import { clearToken, clearStoreData, setActiveStore, formatStoreName, getActiveS
 
 const nav = [
   { href: '/dashboard', label: 'Daily Sales', icon: '📊' },
+  { href: '/daily', label: 'Log Daily Report', icon: '📋' },
+  { href: '/ledger', label: 'Ledger', icon: '🗂️' },
   { href: '/chat', label: 'Store Chat', icon: '💬' },
   { href: '/prices', label: 'Price Database', icon: '🔍' },
   { href: '/order', label: 'Order Builder', icon: '📦' },
   { href: '/health', label: 'Health Score', icon: '💪' },
+  { href: '/bank', label: 'Bank Account', icon: '🏦' },
 ]
 
 interface SidebarProps {

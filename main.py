@@ -24,6 +24,7 @@ import sys
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from bot import build_app, scheduled_daily
 from config.settings import settings
@@ -54,11 +55,11 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
         replace_existing=True,
     )
 
-    # Nightly sync — midnight, reconciles Sheets edits → PostgreSQL
+    # Sheets → PostgreSQL sync every 15 minutes (catches manual edits fast)
     scheduler.add_job(
         run_nightly_sync,
         args=[settings.store_id],
-        trigger=CronTrigger(hour=0, minute=0, timezone=tz),
+        trigger=IntervalTrigger(minutes=15),
         id="nightly_sync",
         name="Nightly Sheets → PostgreSQL Sync",
         replace_existing=True,

@@ -26,12 +26,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from config.settings import settings
 from db.database import get_async_session
-from db.models import DailySales, Expense, Rebate, Revenue
+from db.models import DailySales, Expense, Invoice, Rebate, Revenue
 from tools.sheets_tools import (
+    COGS_VENDOR_COLS,
     DAILY_HEADERS,
     EXPENSES_HEADERS,
     PROFIT_HEADERS,
     REBATES_HEADERS,
+    _COGS_DATA_START,
     _DAILY_DATA_START,
     _EXP_DATA_START,
     _PROFIT_COL_START,
@@ -306,6 +308,46 @@ async def _sync_daily_sales(
     return updates
 
 
+async def _sync_invoices(
+    store_id: str,
+    sheet: gspread.Worksheet,
+    target_date: date,
+    num_days: int,
+) -> int:
+    """Sync COGS/Invoices section from Sheets → PostgreSQL. Returns count of upserts."""
+    sheet_data = _read_sheet_section(sheet, _COGS_DATA_START, num_days, COGS_VENDOR_COLS)
+    updates = 0
+
+    async with get_async_session() as session:
+        for day, cols in sheet_data.items():
+            row_date = date(target_date.year, target_date.month, day)
+            for vendor, sheet_amount in cols.items():
+                result = await session.execute(
+                    select(Invoice).where(
+                        Invoice.store_id == store_id,
+                        Invoice.invoice_date == row_date,
+                        Invoice.vendor == vendor,
+                        Invoice.last_updated_by == "owner",
+                    )
+                )
+                existing = result.scalar_one_or_none()
+
+                if existing is None:
+                    session.add(Invoice(
+                        store_id=store_id,
+                        invoice_date=row_date,
+                        vendor=vendor,
+                        amount=sheet_amount,
+                        last_updated_by="owner",
+                    ))
+                    updates += 1
+                elif existing.amount != sheet_amount:
+                    existing.amount = sheet_amount
+                    updates += 1
+
+    return updates
+
+
 async def run_nightly_sync(store_id: str) -> None:
     """
     Main nightly sync entry point. Called by APScheduler at midnight.
@@ -326,11 +368,12 @@ async def run_nightly_sync(store_id: str) -> None:
         exp_count = await _sync_expenses(store_id, sheet, today, num_days)
         reb_count = await _sync_rebates(store_id, sheet, today, num_days)
         rev_count = await _sync_revenues(store_id, sheet, today, num_days)
+        inv_count = await _sync_invoices(store_id, sheet, today, num_days)
 
-        total = sales_count + exp_count + reb_count + rev_count
+        total = sales_count + exp_count + reb_count + rev_count + inv_count
         log.info(
-            "[%s] Nightly sync complete — %d sales, %d expenses, %d rebates, %d revenues (%d total)",
-            store_id, sales_count, exp_count, reb_count, rev_count, total,
+            "[%s] Nightly sync complete — %d sales, %d expenses, %d rebates, %d revenues, %d invoices (%d total)",
+            store_id, sales_count, exp_count, reb_count, rev_count, inv_count, total,
         )
 
         # Run anomaly checks after sync so we have latest data

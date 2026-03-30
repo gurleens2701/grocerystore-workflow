@@ -191,11 +191,35 @@ class BankTransaction(Base):
     matched_invoice_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_matched: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Reconciliation fields
+    review_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending, confirmed, skipped, auto
+    reconcile_type: Mapped[str | None] = mapped_column(String(32), nullable=True)  # invoice, expense, cc_settlement, rebate, payroll, skip
+    reconcile_subcategory: Mapped[str | None] = mapped_column(String(128), nullable=True)  # vendor name or expense category
+
     last_updated_by: Mapped[str] = mapped_column(String(16), default="bot")
     last_updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ---------------------------------------------------------------------------
+# transaction_rules — learned patterns for auto-categorization
+# ---------------------------------------------------------------------------
+
+class TransactionRule(Base):
+    __tablename__ = "transaction_rules"
+    __table_args__ = (UniqueConstraint("store_id", "pattern"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    pattern: Mapped[str] = mapped_column(String(256), nullable=False)  # lowercase substring to match in description
+    reconcile_type: Mapped[str] = mapped_column(String(32), nullable=False)  # invoice, expense, cc_settlement, rebate, payroll, skip
+    reconcile_subcategory: Mapped[str | None] = mapped_column(String(128), nullable=True)  # vendor or category
+    confirmed_count: Mapped[int] = mapped_column(Integer, default=1)  # times user confirmed — higher = more confidence
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 # ---------------------------------------------------------------------------

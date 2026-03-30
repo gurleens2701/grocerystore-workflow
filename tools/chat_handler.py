@@ -446,10 +446,20 @@ async def process_message(text: str, store_id: str) -> str:
                 except ValueError:
                     inv_date = date.today()
                 inv_num = pending_items.get("invoice_number", "")
-                invoice_id = await save_invoice(store_id, vendor, 0, inv_date, inv_num)
-                count = await save_invoice_items(
-                    store_id, vendor, pending_items.get("items", []), inv_date, invoice_id
+                items = pending_items.get("items", [])
+                total_amount = sum(
+                    float(i.get("case_price") or 0) or float(i.get("unit_price") or 0)
+                    for i in items
                 )
+                invoice_id = await save_invoice(store_id, vendor, total_amount, inv_date, inv_num)
+                count = await save_invoice_items(
+                    store_id, vendor, items, inv_date, invoice_id
+                )
+                # Write to Google Sheets COGS section
+                try:
+                    log_cogs_entry(vendor=vendor, amount=total_amount, entry_date=inv_date)
+                except Exception as sheet_err:
+                    log.warning("Sheets COGS write failed: %s", sheet_err)
                 await clear_state(store_id, _STATE_INVOICE_ITEMS)
                 return f"✅ Saved {count} items from {vendor} ({inv_date}).\nUse /price <item> to look up prices."
             except Exception as e:

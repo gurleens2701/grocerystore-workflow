@@ -18,10 +18,11 @@ from datetime import date, timedelta
 from typing import Any
 
 import anthropic
-from telegram import Bot, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -37,12 +38,19 @@ from tools.invoice_extractor import extract_invoice_from_photo
 from tools.nrs_tools import fetch_daily_sales, fetch_inventory
 from tools.price_lookup import compile_order, lookup_item_price, parse_order_list
 from tools.health_score import _build_health_score_async, send_weekly_health_score
+from tools.onboarding import (
+    ONBOARDING_STEP_NAME, ONBOARDING_STEP_LANG,
+    ONBOARDING_STEP_BACKOFFICE, ONBOARDING_STEP_BANK,
+    get_user_profile, is_onboarding_complete,
+    onboarding_bank, onboarding_backoffice,
+    onboarding_language, onboarding_name, onboarding_start,
+)
 from tools.query_agent import answer_query
 from tools.reports import save_daily_report
 from tools.vendor_agent import get_vendor_comparison
 from tools.sheets_tools import (
     log_cogs_entry, log_daily_sales, log_expense, log_inventory,
-    log_rebate, log_revenue, log_transactions, resolve_vendor,
+    log_rebate, log_revenue, log_transactions, mark_invoice_paid, resolve_vendor,
 )
 
 log = logging.getLogger(__name__)
@@ -52,7 +60,9 @@ AWAITING_RIGHT_SIDE = 1
 
 # PostgreSQL state keys
 _STATE_SALES = "sales"
-_STATE_INVOICE_ITEMS = "invoice_items"  # pending extracted line items awaiting user confirmation
+_STATE_INVOICE_ITEMS = "invoice_items"   # pending extracted line items awaiting user confirmation
+_STATE_AWAITING_REPORT = "awaiting_daily_report"  # manual mode: waiting for the report photo
+_STATE_REPORT_DRAFT = "daily_report_draft"        # manual mode: OCR done, some fields still missing
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +306,24 @@ async def _do_daily_fetch(bot: Bot, chat_id: str) -> bool:
         return False
 
 
+async def _do_manual_daily_prompt(bot: Bot, chat_id: str) -> None:
+    """Manual-mode: ask owner to send their daily report photo."""
+    await save_state(settings.store_id, _STATE_AWAITING_REPORT, {"pending": True})
+    msg = (
+        "📋 Ready to log today's sales!\n\n"
+        "Take a photo of your daily sales report and send it here.\n"
+        "Or send it as a file for better accuracy.\n\n"
+        "_I'll read all the numbers and fill in the sheet for you._"
+    )
+    await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
+
+
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle /daily command — triggers the fetch and starts the conversation."""
+    """Handle /daily command — triggers fetch (NRS) or photo prompt (manual mode)."""
+    profile = await get_user_profile(settings.store_id)
+    if profile.get("backoffice") == "manual":
+        await _do_manual_daily_prompt(context.bot, settings.telegram_chat_id)
+        return ConversationHandler.END
     ok = await _do_daily_fetch(context.bot, settings.telegram_chat_id)
     return AWAITING_RIGHT_SIDE if ok else ConversationHandler.END
 
@@ -367,13 +393,45 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ---------------------------------------------------------------------------
 
 async def scheduled_daily(app: Application) -> None:
-    """Called by the scheduler at 7 AM. Fetches data and sends left side."""
+    """Called by the scheduler at 7 AM. Fetches data (NRS) or prompts for photo (manual)."""
     bot = app.bot
-    ok = await _do_daily_fetch(bot, settings.telegram_chat_id)
-    if ok:
-        # Set conversation state so the next message is treated as right-side input
-        # We store a dummy update to prime the ConversationHandler
-        log.info("Scheduled daily fetch complete — waiting for right-side input via Telegram.")
+    profile = await get_user_profile(settings.store_id)
+    if profile.get("backoffice") == "manual":
+        await _do_manual_daily_prompt(bot, settings.telegram_chat_id)
+        log.info("Scheduled daily prompt sent (manual mode) — waiting for report photo.")
+    else:
+        ok = await _do_daily_fetch(bot, settings.telegram_chat_id)
+        if ok:
+            log.info("Scheduled daily fetch complete — waiting for right-side input via Telegram.")
+
+    # Bank sync + reconcile (if connected)
+    from tools.plaid_tools import is_connected, sync_transactions
+    try:
+        if await is_connected(settings.store_id):
+            result = await sync_transactions(settings.store_id)
+            needs_review  = result.get("needs_review", [])
+            cc_mismatches = result.get("cc_mismatches", [])
+            paid_invoices = result.get("paid_invoices", [])
+
+            for inv in paid_invoices:
+                try:
+                    await _send_invoice_paid_alert(bot, inv)
+                except Exception as e:
+                    log.warning("Invoice paid alert failed: %s", e)
+
+            for txn in needs_review[:5]:
+                try:
+                    await send_bank_review_request(bot, txn)
+                except Exception as e:
+                    log.warning("Review request failed for txn %s: %s", txn.get("id"), e)
+
+            for mm in cc_mismatches:
+                try:
+                    await send_cc_mismatch_alert(bot, mm)
+                except Exception as e:
+                    log.warning("CC mismatch alert failed: %s", e)
+    except Exception as e:
+        log.warning("Scheduled bank sync failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -852,15 +910,67 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     sender = update.effective_user.first_name or "Owner"
     asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, text))
 
+    # ── Onboarding gate — redirect new users before anything else ────────────
+    if not await is_onboarding_complete(settings.store_id):
+        await onboarding_start(update, context)
+        return
+
+    # ── Load owner profile (name, language) ─────────────────────────────────
+    profile = await get_user_profile(settings.store_id)
+    owner_name = profile.get("name", "")
+
     # ── Help shortcut — catch /help, \\help, //help, "help" etc ─────────────
     clean = text.lstrip("/\\").lower().strip()
     if clean in ("help", "help me", "what can you do", "features"):
         await cmd_help(update, context)
         return
 
+    # ── Priority 0.5: pending bank transaction subcategory reply ────────────
+    # Check if user just clicked an inline button that needs a follow-up text
+    from db.state import get_state as _gs
+    pending_confirm_keys = [
+        k for k in (await _list_bank_confirm_keys(settings.store_id))
+    ]
+    if pending_confirm_keys:
+        key = pending_confirm_keys[0]  # take first pending
+        state = await get_state(settings.store_id, key)
+        if state:
+            from tools.bank_reconciler import confirm_transaction
+            txn_id = state["txn_id"]
+            reconcile_type = state["reconcile_type"]
+            subcategory = text.strip()
+            await clear_state(settings.store_id, key)
+            result = await confirm_transaction(settings.store_id, txn_id, reconcile_type, subcategory, sender="user")
+            if result:
+                await update.message.reply_text(
+                    f"✅ Logged as {reconcile_type}: {subcategory}\n"
+                    f"I'll remember this for similar transactions in the future.",
+                    parse_mode=None,
+                )
+            else:
+                await update.message.reply_text("⚠️ Could not find that transaction.", parse_mode=None)
+            return
+
     # ── Priority 1: pending daily sheet ─────────────────────────────────────
     sales = await get_state(settings.store_id, _STATE_SALES)
     if sales:
+        # "ok" / "confirm" means the OCR pre-filled everything and user is confirming
+        clean_reply = text.strip().lower()
+        if clean_reply in ("ok", "confirm", "yes", "save", "good", "correct"):
+            # Use OCR-prefilled right-side values stored in the sales dict
+            right = {
+                "lotto_po":   sales.get("_ocr_lotto_po", 0),
+                "lotto_cr":   sales.get("_ocr_lotto_cr", 0),
+                "food_stamp": sales.get("_ocr_food_stamp", 0),
+            }
+            sales_for_sheet = dict(sales)
+            sales_for_sheet.update(right)
+            log_daily_sales(sales_for_sheet)
+            await save_daily_sales(settings.store_id, sales, right)
+            save_daily_report(settings.store_id, sales, right)
+            await clear_state(settings.store_id, _STATE_SALES)
+            await update.message.reply_text("✅ Confirmed and logged to Google Sheets.", parse_mode=None)
+            return
         right = _parse_right_side(text)
         if right is not None:
             sheet_msg = _build_complete_sheet(sales, right)
@@ -932,6 +1042,91 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             )
         return
 
+    # ── Priority 2.5: daily report draft — collecting missing fields ────────
+    report_draft = await get_state(settings.store_id, _STATE_REPORT_DRAFT)
+    if report_draft:
+        missing     = report_draft.get("missing", [])
+        extracted   = dict(report_draft.get("extracted", {}))
+        departments = report_draft.get("departments", [])
+        raw_date    = report_draft.get("report_date")
+        try:
+            report_date = date.fromisoformat(raw_date) if raw_date else date.today()
+        except (ValueError, TypeError):
+            report_date = date.today()
+
+        # Try to parse labeled values first (e.g. "lotto po 45 lotto cr 0 food stamp 27")
+        parsed_labeled: dict[str, float] = {}
+        text_lower = text.lower()
+        for field in missing:
+            aliases = {
+                "lotto_po":      ["lotto po", "lotto payout", "lotto p.o", "lottery payout"],
+                "lotto_cr":      ["lotto cr", "lotto credit", "lottery credit"],
+                "lotto_in":      ["instant lotto", "scratch", "lotto in"],
+                "lotto_online":  ["online lotto", "lottery terminal", "keno"],
+                "food_stamp":    ["food stamp", "ebt", "snap"],
+                "product_sales": ["total", "product sales", "net sales"],
+                "sales_tax":     ["sales tax", "tax"],
+                "gpi":           ["gpi", "fee buster", "feebuster"],
+                "cash_drop":     ["cash drop", "drop"],
+                "card":          ["card", "credit", "debit"],
+            }.get(field, [field.replace("_", " ")])
+            for alias in aliases:
+                m = re.search(re.escape(alias) + r"[\s:]*(\d+\.?\d*)", text_lower)
+                if m:
+                    parsed_labeled[field] = round(float(m.group(1)), 2)
+                    break
+
+        # Fall back to positional numbers if labeled parsing didn't cover everything
+        still_missing_after_label = [f for f in missing if f not in parsed_labeled]
+        if still_missing_after_label:
+            nums = re.findall(r"\d+\.?\d*", text)
+            for i, field in enumerate(still_missing_after_label):
+                if i < len(nums):
+                    parsed_labeled[field] = round(float(nums[i]), 2)
+
+        # Merge parsed values into extracted
+        for field, val in parsed_labeled.items():
+            extracted[field] = val
+
+        remaining_missing = [f for f in missing if extracted.get(f) is None]
+
+        if remaining_missing:
+            await update.message.reply_text(
+                f"Still need: {', '.join(_FIELD_HUMAN.get(f, f) for f in remaining_missing)}\n"
+                f"Reply with those values (in that order, labeled or plain numbers).",
+                parse_mode=None,
+            )
+            # Update draft with what we've got so far
+            report_draft["extracted"] = extracted
+            report_draft["missing"] = remaining_missing
+            await save_state(settings.store_id, _STATE_REPORT_DRAFT, report_draft)
+            return
+
+        await clear_state(settings.store_id, _STATE_REPORT_DRAFT)
+
+        # All fields now filled — check if we still need lotto_po/lotto_cr
+        lotto_po   = extracted.get("lotto_po") or 0
+        lotto_cr   = extracted.get("lotto_cr") or 0
+        food_stamp = extracted.get("food_stamp") or 0
+
+        sales = _build_ocr_sales_dict(extracted, departments, report_date)
+        right = {"lotto_po": lotto_po, "lotto_cr": lotto_cr, "food_stamp": food_stamp}
+
+        sheet_msg = _build_complete_sheet(sales, right)
+        await update.message.reply_text(sheet_msg, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("📊 Logging...", parse_mode=None)
+        try:
+            sales_for_sheet = dict(sales)
+            sales_for_sheet.update(right)
+            log_daily_sales(sales_for_sheet)
+            await save_daily_sales(settings.store_id, sales, right)
+            save_daily_report(settings.store_id, sales, right)
+            await update.message.reply_text("✅ Logged to Google Sheets.", parse_mode=None)
+        except Exception as e:
+            log.error("Sheets logging failed: %s", e, exc_info=True)
+            await update.message.reply_text(f"⚠️ Sheets logging failed: {e}", parse_mode=None)
+        return
+
     # ── Priority 3: pending order list ──────────────────────────────────────
     awaiting_order = await get_state(settings.store_id, "awaiting_order")
     if awaiting_order:
@@ -944,11 +1139,16 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     log.info("Intent: %s | %s", intent, text[:60])
 
     if intent == "daily_fetch":
-        await _do_daily_fetch(context.bot, settings.telegram_chat_id)
+        if profile.get("backoffice") == "manual":
+            await _do_manual_daily_prompt(context.bot, settings.telegram_chat_id)
+        else:
+            await _do_daily_fetch(context.bot, settings.telegram_chat_id)
     else:
         from tools.main_agent import run_agent
         try:
-            reply = await asyncio.get_event_loop().run_in_executor(None, run_agent, text, settings.store_id)
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, run_agent, text, settings.store_id, owner_name
+            )
             await update.message.reply_text(reply, parse_mode=None)
             asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", reply))
         except Exception as e:
@@ -1031,9 +1231,18 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     sender = update.effective_user.first_name or "Owner"
     asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, "🎤 Voice message"))
 
-    # Get language preference
-    lang_pref = await get_state(settings.store_id, "language_pref") or {}
-    lang_code = lang_pref.get("code")  # None = auto-detect
+    # Onboarding gate
+    if not await is_onboarding_complete(settings.store_id):
+        await onboarding_start(update, context)
+        return
+
+    # Get language from user profile (set during onboarding), fall back to legacy pref
+    profile = await get_user_profile(settings.store_id)
+    lang_code = profile.get("language") or (
+        (await get_state(settings.store_id, "language_pref") or {}).get("code")
+    )
+    if lang_code == "auto":
+        lang_code = None
 
     await update.message.reply_text("🎤 Listening...", parse_mode=None)
 
@@ -1087,10 +1296,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 audio = await asyncio.get_event_loop().run_in_executor(
                     None, text_to_speech, reply
                 )
-                await update.message.reply_voice(
-                    voice=io.BytesIO(audio),
-                    caption=reply,
-                )
+                await update.message.reply_voice(voice=io.BytesIO(audio))
             except Exception as tts_err:
                 log.warning("TTS failed, falling back to text: %s", tts_err)
                 await update.message.reply_text(reply, parse_mode=None)
@@ -1103,26 +1309,181 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"Could not process voice message: {e}", parse_mode=None)
 
 
+def _build_ocr_sales_dict(extracted: dict, departments: list, report_date: date | None) -> dict:
+    """Build a sales dict (compatible with _fmt_left/_build_complete_sheet) from OCR output."""
+    report_date = report_date or date.today()
+    return {
+        "product_sales": extracted.get("product_sales") or 0,
+        "lotto_in":      extracted.get("lotto_in") or 0,
+        "lotto_online":  extracted.get("lotto_online") or 0,
+        "sales_tax":     extracted.get("sales_tax") or 0,
+        "gpi":           extracted.get("gpi") or 0,
+        "refunds":       0,
+        "departments":   departments,
+        "day_of_week":   report_date.strftime("%A"),
+        "date":          str(report_date),
+        "cash_drops":    extracted.get("cash_drop") or 0,
+        "card":          extracted.get("card") or 0,
+        "check":         extracted.get("check") or 0,
+        "atm":           extracted.get("atm") or 0,
+        "pull_tab":      extracted.get("pull_tab") or 0,
+        "coupon":        extracted.get("coupon") or 0,
+        "loyalty":       extracted.get("loyalty") or 0,
+        "vendor":        0,
+        "total_transactions": 0,
+        "source":        "manual_ocr",
+        "_ocr_lotto_po":    extracted.get("lotto_po") or 0,
+        "_ocr_lotto_cr":    extracted.get("lotto_cr") or 0,
+        "_ocr_food_stamp":  extracted.get("food_stamp") or 0,
+    }
+
+
+_FIELD_HUMAN = {
+    "product_sales": "product sales (TOTAL)",
+    "lotto_in":      "instant lotto sales",
+    "lotto_online":  "online lotto sales",
+    "sales_tax":     "sales tax",
+    "gpi":           "GPI",
+    "cash_drop":     "cash drop",
+    "card":          "card total",
+    "food_stamp":    "food stamp / EBT",
+    "lotto_po":      "Lotto Payout (cash paid to winners)",
+    "lotto_cr":      "Lotto Credit (net lottery)",
+}
+
+
+def _fmt_ocr_summary(extracted: dict, departments: list, must_ask: list, report_date: date | None) -> str:
+    """Format a summary of what OCR found, split by got vs need."""
+    rd = report_date.strftime("%A %b %-d") if report_date else "today"
+    lines = [f"📋 *POS Report — {rd}*", ""]
+
+    if departments:
+        lines.append("*Departments:*")
+        lines.append("```")
+        for d in departments:
+            lines.append(f"  {d['name']:<22} ${d['sales']:>8.2f}")
+        lines.append("```")
+        lines.append("")
+
+    show_fields = ["product_sales", "lotto_in", "lotto_online", "sales_tax", "gpi",
+                   "cash_drop", "card", "check", "atm", "food_stamp"]
+    lines.append("*From your report:*")
+    lines.append("```")
+    for f in show_fields:
+        val = extracted.get(f)
+        if val is not None and val != 0:
+            label = _FIELD_HUMAN.get(f, f).upper()
+            lines.append(f"  {label:<22} ${val:>8.2f}")
+    lines.append("```")
+
+    if must_ask:
+        still_human = [_FIELD_HUMAN.get(f, f) for f in must_ask]
+        lines.append("")
+        lines.append(f"❓ *Still needed:*  {', '.join(still_human)}")
+
+    return "\n".join(lines)
+
+
+def _prompt_for_missing(must_ask: list) -> str:
+    """Build a prompt asking only for the specific missing fields."""
+    human = [_FIELD_HUMAN.get(f, f) for f in must_ask]
+    lines = ["\n\n📝 *Please reply with the following:*", "_(Enter 0 if none)_", "", "```"]
+    for h in human:
+        lines.append(f"{h.upper():<28}")
+    lines.append("```")
+    return "\n".join(lines)
+
+
+async def _handle_daily_report_photo(update, context, photo_bytes: bytes) -> None:
+    """
+    OCR a POS daily report photo.
+    Shows extracted numbers, then asks ONLY for what's missing
+    (lotto payout, lotto credit, and anything the OCR couldn't read).
+    """
+    from tools.report_ocr import extract_daily_report_from_photo
+
+    await update.message.reply_text("📋 Reading your POS report...", parse_mode=None)
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, extract_daily_report_from_photo, photo_bytes
+        )
+    except Exception as e:
+        log.error("Daily report OCR failed: %s", e, exc_info=True)
+        await update.message.reply_text(
+            f"⚠️ Could not read the report: {e}\n\n"
+            "You can enter numbers manually — type /daily.",
+            parse_mode=None,
+        )
+        return
+
+    extracted   = result["extracted"]
+    departments = result["departments"]
+    must_ask    = result["must_ask"]
+    report_date = result["report_date"]
+
+    await clear_state(settings.store_id, _STATE_AWAITING_REPORT)
+
+    summary = _fmt_ocr_summary(extracted, departments, must_ask, report_date)
+
+    if must_ask:
+        # Save draft and ask for specific missing fields
+        draft = {
+            "extracted":   extracted,
+            "departments": departments,
+            "missing":     must_ask,
+            "report_date": str(report_date) if report_date else None,
+        }
+        await save_state(settings.store_id, _STATE_REPORT_DRAFT, draft)
+        await update.message.reply_text(
+            summary + _prompt_for_missing(must_ask),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # All fields found — build complete sheet immediately
+    sales = _build_ocr_sales_dict(extracted, departments, report_date)
+    right = {
+        "lotto_po":   extracted.get("lotto_po") or 0,
+        "lotto_cr":   extracted.get("lotto_cr") or 0,
+        "food_stamp": extracted.get("food_stamp") or 0,
+    }
+    await save_state(settings.store_id, _STATE_SALES, sales)
+    sheet_msg = _build_complete_sheet(sales, right)
+    await update.message.reply_text(
+        summary + "\n\n" + sheet_msg
+        + "\n\n_Reply *ok* to log, or correct any numbers first._",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle a photo or document message — extract line items via Claude Opus vision.
     Accepts photos (Telegram-compressed) and documents (full quality, better OCR).
     """
     sender = update.effective_user.first_name or "Owner"
-    asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, "📸 Sent an invoice photo"))
-    await update.message.reply_text("📸 Reading invoice, this may take a few seconds...", parse_mode=None)
+    asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, "📸 Sent a photo"))
 
     try:
-        # Prefer document (uncompressed) over photo (Telegram-compressed)
+        # Download photo bytes first — shared by both flows
         if update.message.document:
             file = await context.bot.get_file(update.message.document.file_id)
         else:
-            photo = update.message.photo[-1]  # largest compressed size
+            photo = update.message.photo[-1]
             file = await context.bot.get_file(photo.file_id)
-        photo_bytes = await file.download_as_bytearray()
+        photo_bytes = bytes(await file.download_as_bytearray())
+
+        # ── Manual mode: daily report photo ──────────────────────────────────
+        awaiting_report = await get_state(settings.store_id, _STATE_AWAITING_REPORT)
+        if awaiting_report:
+            await _handle_daily_report_photo(update, context, photo_bytes)
+            return
+
+        await update.message.reply_text("📸 Reading invoice, this may take a few seconds...", parse_mode=None)
 
         result = await asyncio.get_event_loop().run_in_executor(
-            None, extract_invoice_from_photo, bytes(photo_bytes)
+            None, extract_invoice_from_photo, photo_bytes
         )
 
         if result.get("error"):
@@ -1161,6 +1522,235 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"⚠️ Error: {e}", parse_mode=None)
 
 
+async def _list_bank_confirm_keys(store_id: str) -> list[str]:
+    """Return all state keys for pending bank transaction subcategory replies."""
+    from sqlalchemy import select
+    from db.database import get_async_session
+    from db.models import PendingState
+    async with get_async_session() as session:
+        rows = (await session.execute(
+            select(PendingState.state_key).where(
+                PendingState.store_id == store_id,
+                PendingState.state_key.like("bank_confirm_%"),
+            )
+        )).scalars().all()
+    return list(rows)
+
+
+# ── Bank review helpers ──────────────────────────────────────────────────────
+
+_REVIEW_TYPES = [
+    ("Vendor Invoice", "invoice"),
+    ("Expense",        "expense"),
+    ("CC Settlement",  "cc_settlement"),
+    ("Rebate",         "rebate"),
+    ("Payroll",        "payroll"),
+    ("Skip / Fee",     "skip"),
+]
+
+
+async def _send_invoice_paid_alert(bot: Bot, inv: dict) -> None:
+    """Notify owner that a vendor invoice has been confirmed paid by the bank."""
+    text = (
+        f"✅ *Invoice Paid — {inv['vendor']}*\n"
+        f"  Amount: *${inv['amount']:,.2f}*\n"
+        f"  Invoice date: {inv['invoice_date']}\n"
+        f"  Bank cleared: {inv['bank_date']}\n"
+        f"  Google Sheet cell marked green ✔"
+    )
+    await bot.send_message(
+        chat_id=settings.telegram_chat_id,
+        text=text,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def send_bank_review_request(bot: Bot, txn: dict) -> None:
+    """Send a single transaction review message with inline keyboard to the owner."""
+    direction = "OUT" if txn["amount"] > 0 else "IN"
+    emoji     = "💸" if txn["amount"] > 0 else "💰"
+    desc      = txn["description"][:40]
+    amount    = abs(txn["amount"])
+    ai_guess  = txn.get("ai_guess", "")
+    confidence = txn.get("confidence", 0.0)
+
+    hint = f"  AI guess: {ai_guess} ({confidence*100:.0f}%)" if ai_guess and ai_guess != "skip" else ""
+
+    text = (
+        f"{emoji} *Unknown transaction — please classify*\n"
+        f"{'─'*32}\n"
+        f"  {txn['date']}  [{direction}]\n"
+        f"  {desc}\n"
+        f"  *${amount:,.2f}*\n"
+        f"{hint}"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"bk:{rtype}:{txn['id']}")]
+        for label, rtype in _REVIEW_TYPES
+    ]
+
+    await bot.send_message(
+        chat_id=settings.telegram_chat_id,
+        text=text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def send_cc_mismatch_alert(bot: Bot, mismatch: dict) -> None:
+    """Notify owner of a CC settlement vs daily card total mismatch."""
+    diff = mismatch["diff"]
+    diff_str = f"+${diff:,.2f} (bank over)" if diff > 0 else f"-${abs(diff):,.2f} (short)"
+    text = (
+        f"⚠️ *CC Settlement Mismatch*\n"
+        f"{'─'*32}\n"
+        f"  Bank deposit: ${mismatch['bank_amount']:,.2f} on {mismatch['bank_date']}\n"
+        f"  Daily card: ${mismatch['sale_card']:,.2f} for {mismatch['sale_date']}\n"
+        f"  Difference: {diff_str}\n\n"
+        f"Check your dashboard: http://178.104.61.18/bank"
+    )
+    await bot.send_message(
+        chat_id=settings.telegram_chat_id,
+        text=text,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline keyboard responses for bank transaction review."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data  # format: "bk:{reconcile_type}:{txn_id}"
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "bk":
+        return
+
+    _, reconcile_type, txn_id_str = parts
+    txn_id = int(txn_id_str)
+    store_id = settings.store_id
+
+    # For types that need a subcategory, prompt the user
+    if reconcile_type in ("invoice", "expense", "rebate", "payroll"):
+        # Store pending confirmation in DB state so next plain-text triggers it
+        await save_state(store_id, f"bank_confirm_{txn_id}", {
+            "txn_id": txn_id,
+            "reconcile_type": reconcile_type,
+        })
+
+        label_map = {
+            "invoice": "vendor name (e.g. McLane, Core-Mark)",
+            "expense":  "expense category (e.g. Rent, Insurance, Utilities)",
+            "rebate":   "vendor name (e.g. Altria, RJ Reynolds)",
+            "payroll":  "employee name",
+        }
+        await query.edit_message_text(
+            f"✏️ What is the {label_map.get(reconcile_type, 'category')} for this transaction?\n"
+            f"Reply with a short name.",
+            parse_mode=None,
+        )
+        return
+
+    # For types that don't need extra info, confirm immediately
+    from tools.bank_reconciler import confirm_transaction, skip_transaction
+    if reconcile_type == "skip":
+        await skip_transaction(store_id, txn_id)
+        await query.edit_message_text("✅ Marked as skipped (fee/transfer). Won't ask again for similar transactions.", parse_mode=None)
+    elif reconcile_type == "cc_settlement":
+        result = await confirm_transaction(store_id, txn_id, "cc_settlement", None, sender="user")
+        await query.edit_message_text("✅ Marked as CC settlement. Learning pattern for future.", parse_mode=None)
+    else:
+        result = await confirm_transaction(store_id, txn_id, reconcile_type, None, sender="user")
+        await query.edit_message_text(f"✅ Confirmed as {reconcile_type}.", parse_mode=None)
+
+
+async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/bank — show bank balance and recent transactions, or prompt to connect."""
+    from tools.plaid_tools import is_connected, fetch_accounts, get_recent_transactions, sync_transactions
+
+    connected = await is_connected(settings.store_id)
+
+    if not connected:
+        await update.message.reply_text(
+            "🏦 No bank account connected yet.\n\n"
+            "To connect your business checking account, go to your dashboard:\n"
+            f"http://178.104.61.18/bank\n\n"
+            "Once connected, I can show your balance here and automatically match "
+            "bank transactions to your invoices and expenses.",
+            parse_mode=None,
+        )
+        return
+
+    # Sync first, then show
+    await update.message.reply_text("🔄 Syncing bank transactions...", parse_mode=None)
+    try:
+        result = await sync_transactions(settings.store_id)
+        accounts      = result.get("accounts", [])
+        added         = result.get("added", 0)
+        matched       = result.get("matched", 0)
+        paid_invoices = result.get("paid_invoices", [])
+        needs_review  = result.get("needs_review", [])
+        cc_mismatches = result.get("cc_mismatches", [])
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Sync failed: {e}", parse_mode=None)
+        return
+
+    # Build balances message
+    if accounts:
+        balance_lines = "\n".join(
+            f"  {a['official_name']}: ${a['current']:,.2f}"
+            for a in accounts
+        )
+    else:
+        balance_lines = "  (no accounts)"
+
+    # Recent transactions (last 7 days)
+    txns = await get_recent_transactions(settings.store_id, days=7)
+    if txns:
+        txn_lines = "\n".join(
+            f"  {'✓' if t['is_matched'] else '·'} {t['date']}  {t['description'][:28]:<28}  ${t['amount']:>8.2f}"
+            for t in txns[:10]
+        )
+    else:
+        txn_lines = "  No transactions in last 7 days."
+
+    review_note = f"\n\n⚠️ {len(needs_review)} transaction(s) need your review — see below." if needs_review else ""
+    cc_note     = f"\n⚠️ {len(cc_mismatches)} CC settlement mismatch(es) detected!" if cc_mismatches else ""
+
+    msg = (
+        f"🏦 Bank Update\n"
+        f"{'─'*34}\n"
+        f"BALANCES\n{balance_lines}\n\n"
+        f"LAST 7 DAYS ({added} new, {matched} matched)\n"
+        f"```\n{txn_lines}\n```"
+        f"{review_note}{cc_note}\n\n"
+        f"Full view: http://178.104.61.18/bank"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+    # Send paid invoice alerts
+    for inv in paid_invoices:
+        try:
+            await _send_invoice_paid_alert(context.bot, inv)
+        except Exception as e:
+            log.warning("Invoice paid alert failed: %s", e)
+
+    # Send individual review cards for unknown transactions
+    for txn in needs_review[:5]:  # cap at 5 per sync to avoid spam
+        try:
+            await send_bank_review_request(context.bot, txn)
+        except Exception as e:
+            log.warning("Failed to send review for txn %s: %s", txn.get("id"), e)
+
+    # Send CC mismatch alerts
+    for mm in cc_mismatches:
+        try:
+            await send_cc_mismatch_alert(context.bot, mm)
+        except Exception as e:
+            log.warning("Failed to send CC mismatch alert: %s", e)
+
+
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/sync — manually trigger the nightly Sheets → DB sync right now."""
     from tools.sync import run_nightly_sync
@@ -1190,6 +1780,20 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 def build_app() -> Application:
     app = Application.builder().token(settings.telegram_bot_token).build()
 
+    # Onboarding conversation — runs on /start or first message
+    onboarding_conv = ConversationHandler(
+        entry_points=[CommandHandler("start", onboarding_start)],
+        states={
+            ONBOARDING_STEP_NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_name)],
+            ONBOARDING_STEP_LANG:       [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_language)],
+            ONBOARDING_STEP_BACKOFFICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_backoffice)],
+            ONBOARDING_STEP_BANK:       [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_bank)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+
+    # Daily sales conversation
     conv = ConversationHandler(
         entry_points=[CommandHandler("daily", cmd_daily)],
         states={
@@ -1198,10 +1802,10 @@ def build_app() -> Application:
             ],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
-        # Allow re-entry so the scheduler can prime it
         allow_reentry=True,
     )
 
+    app.add_handler(onboarding_conv)
     app.add_handler(conv)
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("invoice", cmd_invoice))
@@ -1210,7 +1814,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("order", cmd_order))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("sync", cmd_sync))
+    app.add_handler(CommandHandler("bank", cmd_bank))
     app.add_handler(CommandHandler("language", cmd_language))
+    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^bk:"))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_invoice_photo))
