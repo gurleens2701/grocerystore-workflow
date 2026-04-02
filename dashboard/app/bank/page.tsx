@@ -57,14 +57,17 @@ const NEVER_ITEMS = [
 // ── Plaid Link button ─────────────────────────────────────────────────────────
 
 function PlaidButton({ onSuccess, onExit }: { onSuccess: (t: string) => void; onExit: () => void }) {
-  const [linkToken, setLinkToken] = useState<string | null>(null)
-  const [loading, setLoading]     = useState(true)
-  const isOAuthRedirect = typeof window !== 'undefined' && window.location.href.includes('oauth_state_id')
-  const receivedRedirectUri = isOAuthRedirect ? window.location.href : undefined
+  const [linkToken, setLinkToken]           = useState<string | null>(null)
+  const [receivedRedirectUri, setRedirectUri] = useState<string | undefined>(undefined)
+  const [isOAuth, setIsOAuth]               = useState(false)
+  const [loading, setLoading]               = useState(true)
 
   useEffect(() => {
+    const isOAuthRedirect = window.location.href.includes('oauth_state_id')
+    setIsOAuth(isOAuthRedirect)
+
     if (isOAuthRedirect) {
-      // Returning from OAuth — reuse the token we stored before the redirect
+      setRedirectUri(window.location.href)
       const stored = sessionStorage.getItem('plaid_link_token')
       if (stored) { setLinkToken(stored); setLoading(false); return }
     }
@@ -92,8 +95,8 @@ function PlaidButton({ onSuccess, onExit }: { onSuccess: (t: string) => void; on
 
   // Auto-open when returning from OAuth redirect
   useEffect(() => {
-    if (isOAuthRedirect && ready) open()
-  }, [ready])
+    if (isOAuth && ready) open()
+  }, [isOAuth, ready])
 
   if (loading) return (
     <button disabled className="w-full py-3 bg-gray-200 text-gray-400 rounded-xl font-semibold">Loading...</button>
