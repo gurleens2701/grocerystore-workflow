@@ -59,23 +59,41 @@ const NEVER_ITEMS = [
 function PlaidButton({ onSuccess, onExit }: { onSuccess: (t: string) => void; onExit: () => void }) {
   const [linkToken, setLinkToken] = useState<string | null>(null)
   const [loading, setLoading]     = useState(true)
+  const isOAuthRedirect = typeof window !== 'undefined' && window.location.href.includes('oauth_state_id')
+  const receivedRedirectUri = isOAuthRedirect ? window.location.href : undefined
 
   useEffect(() => {
+    if (isOAuthRedirect) {
+      // Returning from OAuth — reuse the token we stored before the redirect
+      const stored = sessionStorage.getItem('plaid_link_token')
+      if (stored) { setLinkToken(stored); setLoading(false); return }
+    }
     api.bank.linkToken().then((d: any) => {
-      if (d?.link_token) setLinkToken(d.link_token)
+      if (d?.link_token) {
+        sessionStorage.setItem('plaid_link_token', d.link_token)
+        setLinkToken(d.link_token)
+      }
       setLoading(false)
     })
   }, [])
 
-  const receivedRedirectUri = typeof window !== 'undefined' && window.location.href.includes('oauth_state_id')
-    ? window.location.href : undefined
-
   const { open, ready } = usePlaidLink({
     token: linkToken ?? '',
-    onSuccess: (public_token) => onSuccess(public_token),
-    onExit: () => onExit(),
+    onSuccess: (public_token) => {
+      sessionStorage.removeItem('plaid_link_token')
+      onSuccess(public_token)
+    },
+    onExit: () => {
+      sessionStorage.removeItem('plaid_link_token')
+      onExit()
+    },
     receivedRedirectUri,
   })
+
+  // Auto-open when returning from OAuth redirect
+  useEffect(() => {
+    if (isOAuthRedirect && ready) open()
+  }, [ready])
 
   if (loading) return (
     <button disabled className="w-full py-3 bg-gray-200 text-gray-400 rounded-xl font-semibold">Loading...</button>
