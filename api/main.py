@@ -1225,11 +1225,11 @@ async def bank_sync(
 ):
     """Pull latest transactions from Plaid and match them to invoices/expenses."""
     from tools.plaid_tools import sync_transactions
-    from tools.bank_reconciler import process_pending_transactions
+    from tools.bank_reconciler import reconcile_new_transactions
     sid = resolve_store(store_id, user)
     try:
         result = await sync_transactions(sid)
-        await process_pending_transactions(sid)
+        await reconcile_new_transactions(sid)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
