@@ -86,13 +86,15 @@ async def disconnect(store_id: str) -> None:
 
 def _create_link_token_sync(store_id: str) -> str:
     client = _client()
-    resp = client.link_token_create(LinkTokenCreateRequest(
+    req = dict(
         user=LinkTokenCreateRequestUser(client_user_id=store_id),
-        client_name="Gas Station Manager",
+        client_name="ClerkAI",
         products=[Products("transactions")],
         country_codes=[CountryCode("US")],
         language="en",
-    ))
+        redirect_uri="https://clerkai.live/bank",
+    )
+    resp = client.link_token_create(LinkTokenCreateRequest(**req))
     return resp["link_token"]
 
 

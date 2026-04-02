@@ -67,10 +67,14 @@ function PlaidButton({ onSuccess, onExit }: { onSuccess: (t: string) => void; on
     })
   }, [])
 
+  const receivedRedirectUri = typeof window !== 'undefined' && window.location.href.includes('oauth_state_id')
+    ? window.location.href : undefined
+
   const { open, ready } = usePlaidLink({
     token: linkToken ?? '',
     onSuccess: (public_token) => onSuccess(public_token),
     onExit: () => onExit(),
+    receivedRedirectUri,
   })
 
   if (loading) return (
