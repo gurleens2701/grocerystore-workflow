@@ -57,20 +57,22 @@ const NEVER_ITEMS = [
 // ── Plaid Link button ─────────────────────────────────────────────────────────
 
 function PlaidButton({ onSuccess, onExit }: { onSuccess: (t: string) => void; onExit: () => void }) {
-  const [linkToken, setLinkToken]           = useState<string | null>(null)
-  const [receivedRedirectUri, setRedirectUri] = useState<string | undefined>(undefined)
-  const [isOAuth, setIsOAuth]               = useState(false)
-  const [loading, setLoading]               = useState(true)
+  // Compute OAuth state synchronously on first client render so usePlaidLink gets correct values immediately
+  const [{ isOAuth, redirectUri, storedToken }] = useState(() => {
+    if (typeof window === 'undefined') return { isOAuth: false, redirectUri: undefined, storedToken: null }
+    const isOAuth = window.location.href.includes('oauth_state_id')
+    return {
+      isOAuth,
+      redirectUri: isOAuth ? window.location.href : undefined,
+      storedToken: isOAuth ? sessionStorage.getItem('plaid_link_token') : null,
+    }
+  })
+
+  const [linkToken, setLinkToken] = useState<string | null>(storedToken)
+  const [loading, setLoading]     = useState(!storedToken)
 
   useEffect(() => {
-    const isOAuthRedirect = window.location.href.includes('oauth_state_id')
-    setIsOAuth(isOAuthRedirect)
-
-    if (isOAuthRedirect) {
-      setRedirectUri(window.location.href)
-      const stored = sessionStorage.getItem('plaid_link_token')
-      if (stored) { setLinkToken(stored); setLoading(false); return }
-    }
+    if (isOAuth) return  // already have stored token
     api.bank.linkToken().then((d: any) => {
       if (d?.link_token) {
         sessionStorage.setItem('plaid_link_token', d.link_token)
@@ -90,13 +92,13 @@ function PlaidButton({ onSuccess, onExit }: { onSuccess: (t: string) => void; on
       sessionStorage.removeItem('plaid_link_token')
       onExit()
     },
-    receivedRedirectUri,
+    receivedRedirectUri: redirectUri,
   })
 
   // Auto-open when returning from OAuth redirect
   useEffect(() => {
     if (isOAuth && ready) open()
-  }, [isOAuth, ready])
+  }, [ready])
 
   if (loading) return (
     <button disabled className="w-full py-3 bg-gray-200 text-gray-400 rounded-xl font-semibold">Loading...</button>
