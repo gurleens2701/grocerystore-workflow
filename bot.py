@@ -1567,13 +1567,47 @@ async def _send_invoice_paid_alert(bot: Bot, inv: dict) -> None:
 
 async def send_bank_review_request(bot: Bot, txn: dict) -> None:
     """Send a single transaction review message with inline keyboard to the owner."""
-    direction = "OUT" if txn["amount"] > 0 else "IN"
-    emoji     = "💸" if txn["amount"] > 0 else "💰"
-    desc      = txn["description"][:40]
-    amount    = abs(txn["amount"])
-    ai_guess  = txn.get("ai_guess", "")
-    confidence = txn.get("confidence", 0.0)
+    direction  = "OUT" if txn["amount"] > 0 else "IN"
+    emoji      = "💸" if txn["amount"] > 0 else "💰"
+    desc       = txn["description"][:40]
+    amount     = abs(txn["amount"])
+    sheet_match = txn.get("sheet_match")
 
+    # --- Proposed check match: show Yes / No ---
+    if sheet_match and sheet_match.get("proposed"):
+        vendor     = sheet_match["vendor"]
+        entry_date = sheet_match["entry_date"]
+        match_type = sheet_match["match_type"]
+        # Save match details in DB state so callback can retrieve them
+        await save_state(settings.store_id, f"bank_match_{txn['id']}", {
+            "match_type": match_type,
+            "vendor":     vendor,
+            "entry_date": str(entry_date),
+        })
+        text = (
+            f"🔍 *Check match found*\n"
+            f"{'─'*32}\n"
+            f"  {txn['date']}  [{direction}]\n"
+            f"  {desc}\n"
+            f"  *${amount:,.2f}*\n\n"
+            f"  Matches *{vendor}* {match_type} logged on {entry_date}\n"
+            f"  Is this correct?"
+        )
+        keyboard = [[
+            InlineKeyboardButton("✅ Yes", callback_data=f"bk_yes:{txn['id']}"),
+            InlineKeyboardButton("❌ No, something else", callback_data=f"bk_no:{txn['id']}"),
+        ]]
+        await bot.send_message(
+            chat_id=settings.telegram_chat_id,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # --- Unknown transaction: standard category keyboard ---
+    ai_guess   = txn.get("ai_guess", "")
+    confidence = txn.get("confidence", 0.0)
     hint = f"  AI guess: {ai_guess} ({confidence*100:.0f}%)" if ai_guess and ai_guess != "skip" else ""
 
     text = (
@@ -1584,12 +1618,10 @@ async def send_bank_review_request(bot: Bot, txn: dict) -> None:
         f"  *${amount:,.2f}*\n"
         f"{hint}"
     )
-
     keyboard = [
         [InlineKeyboardButton(label, callback_data=f"bk:{rtype}:{txn['id']}")]
         for label, rtype in _REVIEW_TYPES
     ]
-
     await bot.send_message(
         chat_id=settings.telegram_chat_id,
         text=text,
@@ -1621,8 +1653,52 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle inline keyboard responses for bank transaction review."""
     query = update.callback_query
     await query.answer()
+    data     = query.data
+    store_id = settings.store_id
 
-    data = query.data  # format: "bk:{reconcile_type}:{txn_id}"
+    # ── Check-match Yes / No ──────────────────────────────────────────────────
+    if data.startswith("bk_yes:") or data.startswith("bk_no:"):
+        prefix, txn_id_str = data.split(":", 1)
+        txn_id = int(txn_id_str)
+
+        if prefix == "bk_yes":
+            # Retrieve the proposed match from DB state
+            match_state = await get_state(store_id, f"bank_match_{txn_id}")
+            await clear_state(store_id, f"bank_match_{txn_id}")
+            if match_state:
+                from datetime import date as _date
+                from tools.bank_reconciler import confirm_transaction, _highlight_sheet_match
+                entry_date = _date.fromisoformat(match_state["entry_date"])
+                await confirm_transaction(store_id, txn_id,
+                                          match_state["match_type"], match_state["vendor"],
+                                          sender="user")
+                await _highlight_sheet_match({
+                    "match_type": match_state["match_type"],
+                    "vendor":     match_state["vendor"],
+                    "entry_date": entry_date,
+                })
+                await query.edit_message_text(
+                    f"✅ Confirmed — {match_state['vendor']} {match_state['match_type']} "
+                    f"on {entry_date}. Sheet highlighted green.",
+                    parse_mode=None,
+                )
+            else:
+                await query.edit_message_text("⚠️ Match state expired. Please re-sync to try again.", parse_mode=None)
+
+        else:  # bk_no — user says it's something else, show standard keyboard
+            await clear_state(store_id, f"bank_match_{txn_id}")
+            keyboard = [
+                [InlineKeyboardButton(label, callback_data=f"bk:{rtype}:{txn_id}")]
+                for label, rtype in _REVIEW_TYPES
+            ]
+            await query.edit_message_text(
+                "Ok — what category is this transaction?",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=None,
+            )
+        return
+
+    # ── Standard category selection ───────────────────────────────────────────
     parts = data.split(":")
     if len(parts) != 3 or parts[0] != "bk":
         return
@@ -1839,7 +1915,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("bank", cmd_bank))
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("token", cmd_token))
-    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^bk:"))
+    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^bk"))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_invoice_photo))

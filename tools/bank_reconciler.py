@@ -141,6 +141,96 @@ async def _ai_categorize(description: str, amount: float) -> dict:
         return {"reconcile_type": "skip", "subcategory": None, "confidence": 0.0, "reason": "AI error"}
 
 
+# ── Google Sheet smart matching ───────────────────────────────────────────────
+
+async def _match_to_sheet(description: str, amount: float) -> dict | None:
+    """
+    Try to match a bank transaction to an existing Google Sheet entry.
+
+    Direction:  amount < 0 → money IN  (rebate, CC settlement)
+                amount > 0 → money OUT (invoice/COGS, expense)
+
+    Returns dict with keys: match_type, vendor, entry_date, proposed (bool)
+    or None if no sheet match found.
+    """
+    import asyncio
+    from tools.sheets_tools import (
+        match_description_to_cogs_vendor,
+        match_description_to_expense,
+        match_description_to_rebate,
+        find_cogs_by_vendor,
+        find_cogs_by_amount,
+        find_expense_by_category,
+        find_expense_by_amount,
+        find_rebate_by_vendor,
+    )
+
+    loop       = asyncio.get_event_loop()
+    abs_amount = abs(amount)
+    is_deposit = amount < 0
+    is_check   = bool(re.match(r"^check\s+\d+", description.lower()))
+
+    if is_deposit:
+        # Money IN — look in rebate section by vendor name
+        rebate_col = match_description_to_rebate(description)
+        if rebate_col:
+            match = await loop.run_in_executor(None, find_rebate_by_vendor, rebate_col, abs_amount)
+            if match:
+                return {"match_type": "rebate", "vendor": rebate_col,
+                        "entry_date": match[0], "proposed": False}
+
+    elif is_check:
+        # CHECK with no vendor name — search COGS then expenses by amount
+        cogs_hits = await loop.run_in_executor(None, find_cogs_by_amount, abs_amount)
+        if cogs_hits:
+            best = cogs_hits[0]
+            return {"match_type": "invoice", "vendor": best[1],
+                    "entry_date": best[0], "sheet_amount": best[2], "proposed": True}
+        exp_hits = await loop.run_in_executor(None, find_expense_by_amount, abs_amount)
+        if exp_hits:
+            best = exp_hits[0]
+            return {"match_type": "expense", "vendor": best[1],
+                    "entry_date": best[0], "sheet_amount": best[2], "proposed": True}
+
+    else:
+        # ACH with vendor name — check COGS first, then expenses
+        cogs_vendor = match_description_to_cogs_vendor(description)
+        if cogs_vendor:
+            match = await loop.run_in_executor(None, find_cogs_by_vendor, cogs_vendor, abs_amount)
+            if match:
+                return {"match_type": "invoice", "vendor": cogs_vendor,
+                        "entry_date": match[0], "proposed": False}
+
+        exp_col = match_description_to_expense(description)
+        if exp_col:
+            match = await loop.run_in_executor(None, find_expense_by_category, exp_col, abs_amount)
+            if match:
+                return {"match_type": "expense", "vendor": exp_col,
+                        "entry_date": match[0], "proposed": False}
+
+    return None
+
+
+async def _highlight_sheet_match(sheet_match: dict) -> None:
+    """Highlight the matched Google Sheet cell green after bank confirms it."""
+    import asyncio
+    from tools.sheets_tools import mark_invoice_paid, mark_expense_paid, mark_rebate_paid
+
+    loop       = asyncio.get_event_loop()
+    match_type = sheet_match["match_type"]
+    vendor     = sheet_match["vendor"]
+    entry_date = sheet_match["entry_date"]
+    try:
+        if match_type == "invoice":
+            await loop.run_in_executor(None, mark_invoice_paid, vendor, entry_date)
+        elif match_type == "expense":
+            await loop.run_in_executor(None, mark_expense_paid, vendor, entry_date)
+        elif match_type == "rebate":
+            await loop.run_in_executor(None, mark_rebate_paid, vendor, entry_date)
+    except Exception as e:
+        log.warning("Sheet highlight failed for %s/%s: %s", match_type, vendor, e)
+
+
 # ── Main reconcile entry ──────────────────────────────────────────────────────
 
 async def reconcile_new_transactions(store_id: str) -> dict:
@@ -164,45 +254,66 @@ async def reconcile_new_transactions(store_id: str) -> dict:
         auto_count = 0
 
         for txn in pending:
-            result = await _lookup_rule(store_id, txn.description)
+            desc   = txn.description
+            amount = float(txn.amount)
 
-            if result and result["confidence"] >= 0.95:
-                # Auto-classify
-                txn.review_status = "auto"
-                txn.reconcile_type = result["reconcile_type"]
-                txn.reconcile_subcategory = result["reconcile_subcategory"]
+            # 1. Instant / learned rules (CC settlement, previously confirmed patterns)
+            rule = await _lookup_rule(store_id, desc)
+            if rule and rule["confidence"] >= 0.95:
+                txn.review_status        = "auto"
+                txn.reconcile_type       = rule["reconcile_type"]
+                txn.reconcile_subcategory = rule["reconcile_subcategory"]
                 auto_count += 1
+                continue
 
-                # Auto-log if it's a cc_settlement (no user action needed)
-                # Other types (expense, invoice, rebate) still need explicit logging
-                # but we mark them auto so they don't spam user
+            # 2. Google Sheet smart matching
+            sheet_match = await _match_to_sheet(desc, amount)
 
-            else:
-                # Try AI for unknown
-                if result is None:
-                    ai = await _ai_categorize(txn.description, float(txn.amount))
-                    confidence = ai.get("confidence", 0.0)
-                    rtype = ai.get("reconcile_type", "skip")
-                    subcat = ai.get("subcategory")
+            if sheet_match and not sheet_match.get("proposed"):
+                # Confident match (ACH vendor found in sheet) — auto-confirm + highlight
+                txn.review_status        = "auto"
+                txn.reconcile_type       = sheet_match["match_type"]
+                txn.reconcile_subcategory = sheet_match["vendor"]
+                auto_count += 1
+                await _highlight_sheet_match(sheet_match)
+                await _upsert_rule(store_id, desc, sheet_match["match_type"],
+                                   sheet_match["vendor"], confirmed=True, session=session)
+                continue
 
-                    if confidence >= 0.95:
-                        txn.review_status = "auto"
-                        txn.reconcile_type = rtype
-                        txn.reconcile_subcategory = subcat
-                        auto_count += 1
-                        # Save as a learned rule so next time it's instant
-                        await _upsert_rule(store_id, txn.description, rtype, subcat, confirmed=False, session=session)
-                    else:
-                        txn.review_status = "needs_review"
-                        txn.reconcile_type = rtype          # AI's best guess
-                        txn.reconcile_subcategory = subcat
-                        needs_review.append(_txn_to_dict(txn, confidence=confidence, ai_guess=rtype))
+            if sheet_match and sheet_match.get("proposed"):
+                # Proposed match (check matched by amount) — ask user to confirm
+                txn.review_status        = "needs_review"
+                txn.reconcile_type       = sheet_match["match_type"]
+                txn.reconcile_subcategory = sheet_match["vendor"]
+                d = _txn_to_dict(txn, confidence=0.8, ai_guess=sheet_match["match_type"])
+                d["sheet_match"] = sheet_match
+                needs_review.append(d)
+                continue
+
+            # 3. AI for truly unknown transactions
+            if rule is None:
+                ai         = await _ai_categorize(desc, amount)
+                confidence = ai.get("confidence", 0.0)
+                rtype      = ai.get("reconcile_type", "skip")
+                subcat     = ai.get("subcategory")
+                if confidence >= 0.95:
+                    txn.review_status        = "auto"
+                    txn.reconcile_type       = rtype
+                    txn.reconcile_subcategory = subcat
+                    auto_count += 1
+                    await _upsert_rule(store_id, desc, rtype, subcat, confirmed=False, session=session)
                 else:
-                    # Rule matched but < 95% confidence — ask user
-                    txn.review_status = "needs_review"
-                    txn.reconcile_type = result["reconcile_type"]
-                    txn.reconcile_subcategory = result["reconcile_subcategory"]
-                    needs_review.append(_txn_to_dict(txn, confidence=result["confidence"], ai_guess=result["reconcile_type"]))
+                    txn.review_status        = "needs_review"
+                    txn.reconcile_type       = rtype
+                    txn.reconcile_subcategory = subcat
+                    needs_review.append(_txn_to_dict(txn, confidence=confidence, ai_guess=rtype))
+            else:
+                # Rule matched but < 95% confidence — ask user
+                txn.review_status        = "needs_review"
+                txn.reconcile_type       = rule["reconcile_type"]
+                txn.reconcile_subcategory = rule["reconcile_subcategory"]
+                needs_review.append(_txn_to_dict(txn, confidence=rule["confidence"],
+                                                  ai_guess=rule["reconcile_type"]))
 
         await session.commit()
 

@@ -28,7 +28,7 @@ Each tab layout (rows are 1-indexed):
 """
 
 import calendar
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import gspread
@@ -777,3 +777,252 @@ def log_inventory(inventory_data: dict[str, Any]) -> str:
 
 def read_recent_sales(days: int = 7) -> list[dict[str, Any]]:
     return []
+
+
+# ---------------------------------------------------------------------------
+# Bank reconciliation — sheet lookup & highlight helpers
+# ---------------------------------------------------------------------------
+
+def _parse_cell_amount(val: Any) -> float | None:
+    """Parse a cell value to float; return None if empty or non-numeric."""
+    if not val:
+        return None
+    try:
+        return float(str(val).replace(",", "").replace("$", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _months_to_check(days_back: int) -> list[date]:
+    """Return month-start dates covering today back to days_back, most recent first."""
+    today = date.today()
+    earliest = today - timedelta(days=days_back)
+    months: list[date] = []
+    d = earliest.replace(day=1)
+    while d <= today.replace(day=1):
+        months.append(d)
+        d = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return list(reversed(months))
+
+
+def find_cogs_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
+    """
+    Search COGS section for a vendor + amount match (±$1, within days_back days).
+    Returns (entry_date, exact_vendor_col) or None.
+    """
+    exact_vendor = resolve_vendor(vendor)
+    if exact_vendor not in _VENDOR_COL_INDEX or exact_vendor in ("DATE", "TOTAL"):
+        return None
+    col_idx = _VENDOR_COL_INDEX[exact_vendor]
+    client = _get_client()
+    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    today = date.today()
+
+    for month_start in _months_to_check(days_back):
+        try:
+            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
+            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+            start_cell = gspread.utils.rowcol_to_a1(_COGS_DATA_START, col_idx)
+            end_cell   = gspread.utils.rowcol_to_a1(_COGS_DATA_START + days_in_month - 1, col_idx)
+            col_values = sheet.get(f"{start_cell}:{end_cell}")
+            for day_offset, row in enumerate(col_values):
+                val = _parse_cell_amount(row[0] if row else None)
+                if val is not None and abs(val - amount) <= 1.0:
+                    entry_date = month_start.replace(day=day_offset + 1)
+                    if (today - entry_date).days <= days_back:
+                        return (entry_date, exact_vendor)
+        except Exception:
+            continue
+    return None
+
+
+def find_cogs_by_amount(amount: float, days_back: int = 14) -> list[tuple[date, str, float]]:
+    """
+    Search COGS section for any vendor with matching amount (±$1, within days_back days).
+    Returns list of (entry_date, vendor_col, cell_amount), most recent first, capped at 3.
+    """
+    client = _get_client()
+    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    today = date.today()
+    matches: list[tuple[date, str, float]] = []
+
+    for month_start in _months_to_check(days_back):
+        try:
+            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
+            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+            start_cell = gspread.utils.rowcol_to_a1(_COGS_DATA_START, 1)
+            end_cell   = gspread.utils.rowcol_to_a1(_COGS_DATA_START + days_in_month - 1, len(COGS_VENDOR_COLS))
+            all_rows   = sheet.get(f"{start_cell}:{end_cell}")
+            for day_offset, row in enumerate(all_rows):
+                for col_offset, cell in enumerate(row):
+                    val = _parse_cell_amount(cell)
+                    if val is not None and abs(val - amount) <= 1.0:
+                        vendor_col = COGS_VENDOR_COLS[col_offset]
+                        if vendor_col in ("DATE", "TOTAL"):
+                            continue
+                        entry_date = month_start.replace(day=day_offset + 1)
+                        if (today - entry_date).days <= days_back:
+                            matches.append((entry_date, vendor_col, val))
+        except Exception:
+            continue
+
+    matches.sort(key=lambda x: x[0], reverse=True)
+    return matches[:3]
+
+
+def find_expense_by_category(category: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
+    """
+    Search EXPENSES section for a category + amount match (±$1, within days_back days).
+    Returns (entry_date, col_name) or None.
+    """
+    col_name = resolve_expense_category(category)
+    if not col_name:
+        return None
+    col_idx = EXPENSES_HEADERS.index(col_name) + 1
+    client = _get_client()
+    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    today = date.today()
+
+    for month_start in _months_to_check(days_back):
+        try:
+            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
+            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+            start_cell = gspread.utils.rowcol_to_a1(_EXP_DATA_START, col_idx)
+            end_cell   = gspread.utils.rowcol_to_a1(_EXP_DATA_START + days_in_month - 1, col_idx)
+            col_values = sheet.get(f"{start_cell}:{end_cell}")
+            for day_offset, row in enumerate(col_values):
+                val = _parse_cell_amount(row[0] if row else None)
+                if val is not None and abs(val - amount) <= 1.0:
+                    entry_date = month_start.replace(day=day_offset + 1)
+                    if (today - entry_date).days <= days_back:
+                        return (entry_date, col_name)
+        except Exception:
+            continue
+    return None
+
+
+def find_expense_by_amount(amount: float, days_back: int = 14) -> list[tuple[date, str, float]]:
+    """
+    Search EXPENSES section for any category with matching amount (±$1, within days_back days).
+    Returns list of (entry_date, col_name, cell_amount), most recent first, capped at 3.
+    """
+    client = _get_client()
+    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    today = date.today()
+    matches: list[tuple[date, str, float]] = []
+
+    for month_start in _months_to_check(days_back):
+        try:
+            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
+            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+            n_cols = len(EXPENSES_HEADERS) - 1  # skip TOTAL
+            start_cell = gspread.utils.rowcol_to_a1(_EXP_DATA_START, 2)  # skip DATE
+            end_cell   = gspread.utils.rowcol_to_a1(_EXP_DATA_START + days_in_month - 1, n_cols)
+            all_rows   = sheet.get(f"{start_cell}:{end_cell}")
+            for day_offset, row in enumerate(all_rows):
+                for col_offset, cell in enumerate(row):
+                    val = _parse_cell_amount(cell)
+                    if val is not None and abs(val - amount) <= 1.0:
+                        col_name = EXPENSES_HEADERS[col_offset + 1]  # +1 for DATE skip
+                        if col_name == "TOTAL":
+                            continue
+                        entry_date = month_start.replace(day=day_offset + 1)
+                        if (today - entry_date).days <= days_back:
+                            matches.append((entry_date, col_name, val))
+        except Exception:
+            continue
+
+    matches.sort(key=lambda x: x[0], reverse=True)
+    return matches[:3]
+
+
+def find_rebate_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
+    """
+    Search REBATES section for a vendor + amount match (±$1, within days_back days).
+    Returns (entry_date, col_name) or None.
+    """
+    col_name = resolve_rebate_vendor(vendor)
+    if not col_name:
+        return None
+    col_idx = REBATES_HEADERS.index(col_name) + 1
+    client = _get_client()
+    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    today = date.today()
+
+    for month_start in _months_to_check(days_back):
+        try:
+            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
+            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+            start_cell = gspread.utils.rowcol_to_a1(_REV_DATA_START, col_idx)
+            end_cell   = gspread.utils.rowcol_to_a1(_REV_DATA_START + days_in_month - 1, col_idx)
+            col_values = sheet.get(f"{start_cell}:{end_cell}")
+            for day_offset, row in enumerate(col_values):
+                val = _parse_cell_amount(row[0] if row else None)
+                if val is not None and abs(val - amount) <= 1.0:
+                    entry_date = month_start.replace(day=day_offset + 1)
+                    if (today - entry_date).days <= days_back:
+                        return (entry_date, col_name)
+        except Exception:
+            continue
+    return None
+
+
+def mark_expense_paid(category: str, entry_date: date) -> str:
+    """Turn the expense cell for this category+date green (bank confirmed payment)."""
+    col_name = resolve_expense_category(category)
+    if not col_name:
+        return f"Expense category '{category}' not found"
+    col_idx    = EXPENSES_HEADERS.index(col_name) + 1
+    target_row = _EXP_DATA_START + entry_date.day - 1
+    cell       = gspread.utils.rowcol_to_a1(target_row, col_idx)
+    client     = _get_client()
+    sheet      = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+    sheet.format(cell, {"backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}})
+    return f"Marked PAID: {col_name} expense on {entry_date}"
+
+
+def mark_rebate_paid(vendor: str, entry_date: date) -> str:
+    """Turn the rebate cell for this vendor+date green (bank confirmed receipt)."""
+    col_name = resolve_rebate_vendor(vendor)
+    if not col_name:
+        return f"Rebate vendor '{vendor}' not found"
+    col_idx    = REBATES_HEADERS.index(col_name) + 1
+    target_row = _REV_DATA_START + entry_date.day - 1
+    cell       = gspread.utils.rowcol_to_a1(target_row, col_idx)
+    client     = _get_client()
+    sheet      = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+    sheet.format(cell, {"backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}})
+    return f"Marked PAID: {col_name} rebate on {entry_date}"
+
+
+def match_description_to_cogs_vendor(description: str) -> str | None:
+    """Return the COGS vendor column name if any alias appears in the description."""
+    desc_lower = description.lower()
+    for alias in sorted(VENDOR_ALIAS_MAP.keys(), key=len, reverse=True):
+        if alias in ("date", "total"):
+            continue
+        if alias in desc_lower:
+            return VENDOR_ALIAS_MAP[alias]
+    return None
+
+
+def match_description_to_expense(description: str) -> str | None:
+    """Return the expense column name if any alias appears in the description."""
+    desc_lower = description.lower()
+    for alias in sorted(_EXPENSE_COL_MAP.keys(), key=len, reverse=True):
+        if alias in ("date", "total", "inventory"):
+            continue
+        if alias in desc_lower:
+            return _EXPENSE_COL_MAP[alias]
+    return None
+
+
+def match_description_to_rebate(description: str) -> str | None:
+    """Return the rebate column name if any alias appears in the description."""
+    desc_lower = description.lower()
+    for alias in sorted(_REBATE_COL_MAP.keys(), key=len, reverse=True):
+        if alias in ("date", "total"):
+            continue
+        if alias in desc_lower:
+            return _REBATE_COL_MAP[alias]
+    return None
