@@ -36,8 +36,28 @@ async def _authenticate() -> str:
     token: str | None = None
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+        )
+        # Hide webdriver flag so reCAPTCHA doesn't detect headless bot
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        page = await context.new_page()
 
         async def _capture(response: Any) -> None:
             nonlocal token
@@ -74,6 +94,7 @@ async def _authenticate() -> str:
                 break
             await asyncio.sleep(0.5)
 
+        await context.close()
         await browser.close()
 
     if not token:
