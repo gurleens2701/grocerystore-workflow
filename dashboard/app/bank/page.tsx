@@ -88,8 +88,10 @@ function PlaidButton({ onSuccess, onExit }: { onSuccess: (t: string) => void; on
       sessionStorage.removeItem('plaid_link_token')
       onSuccess(public_token)
     },
-    onExit: () => {
+    onExit: (err, metadata) => {
       sessionStorage.removeItem('plaid_link_token')
+      if (err) console.error('Plaid exit error:', err, metadata)
+      else console.log('Plaid exited without error:', metadata)
       onExit()
     },
     receivedRedirectUri: redirectUri,
