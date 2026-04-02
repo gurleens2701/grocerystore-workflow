@@ -21,7 +21,7 @@ from playwright.async_api import async_playwright
 from config.settings import settings
 
 # NRS Plus portal constants
-_BASE_URL = "https://mystore.nrsplus.com/merchant/nocache2026012917492101/index.html"
+_BASE_URL = "https://mystore.nrsplus.com"
 _PAPI_BASE = "https://pos-papi.nrsplus.com"
 _STORE_ID = 69653
 _LOGIN_STORE_LABEL = "69201 - MORAINE FOODMART"
@@ -50,7 +50,8 @@ async def _authenticate() -> str:
 
         page.on("response", _capture)
 
-        # Wait for page to be fully interactive before filling credentials
+        # Navigate to base URL — it will redirect to the current portal path
+        # (NRS periodically rotates the nocache parameter in the URL)
         await page.goto(_BASE_URL, wait_until="domcontentloaded")
         await page.wait_for_selector("[name=creduser]", timeout=30000)
 
