@@ -12,6 +12,7 @@ Daily sheet mapping:
 """
 
 import asyncio
+import logging
 from datetime import date, timedelta
 from typing import Any
 
@@ -19,6 +20,29 @@ import httpx
 from playwright.async_api import async_playwright
 
 from config.settings import settings
+
+log = logging.getLogger(__name__)
+
+_STATE_NRS_TOKEN = "nrs_token"
+
+
+async def get_cached_token(store_id: str) -> str | None:
+    """Return the manually-saved NRS token, or None if not set."""
+    from db.state import get_state
+    state = await get_state(store_id, _STATE_NRS_TOKEN)
+    return state.get("token") if state else None
+
+
+async def save_cached_token(store_id: str, token: str) -> None:
+    """Persist a manually-provided NRS token."""
+    from db.state import save_state
+    await save_state(store_id, _STATE_NRS_TOKEN, {"token": token})
+
+
+async def clear_cached_token(store_id: str) -> None:
+    """Remove the cached token (called when NRS returns 401)."""
+    from db.state import clear_state
+    await clear_state(store_id, _STATE_NRS_TOKEN)
 
 # NRS Plus portal constants
 _BASE_URL = "https://mystore.nrsplus.com"
@@ -30,6 +54,24 @@ _LOGIN_STORE_LABEL = "69201 - MORAINE FOODMART"
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
+
+async def _get_token() -> str:
+    """
+    Return a valid NRS session token.
+    Uses the manually-cached token if available; falls back to Playwright login.
+    Raises NRSTokenExpiredError if the cached token is stale (caller should clear it).
+    """
+    token = await get_cached_token(settings.store_id)
+    if token:
+        log.info("Using cached NRS token.")
+        return token
+    log.info("No cached token — attempting Playwright login.")
+    return await _authenticate()
+
+
+class NRSTokenExpiredError(RuntimeError):
+    """Raised when the cached NRS token has expired (HTTP 401 from API)."""
+
 
 async def _authenticate() -> str:
     """Launch headless browser, log in to NRS Plus, return session token."""
@@ -173,8 +215,16 @@ async def get_daily_sales(target_date: date | None = None) -> dict[str, Any]:
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
-    token = await _authenticate()
-    data = await _get_stats(token, target_date)
+    token = await _get_token()
+    try:
+        data = await _get_stats(token, target_date)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            await clear_cached_token(settings.store_id)
+            raise NRSTokenExpiredError(
+                "NRS session expired. Send /token <value> in Telegram to set a new one."
+            ) from e
+        raise
 
     payamts = data.get("payamts", {}) or {}
 
@@ -299,8 +349,16 @@ async def get_transaction_list(target_date: date | None = None) -> list[dict[str
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
-    token = await _authenticate()
-    data = await _get_stats(token, target_date)
+    token = await _get_token()
+    try:
+        data = await _get_stats(token, target_date)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            await clear_cached_token(settings.store_id)
+            raise NRSTokenExpiredError(
+                "NRS session expired. Send /token <value> in Telegram to set a new one."
+            ) from e
+        raise
 
     rows = []
     for d in (data.get("bydept", []) or []):
@@ -328,8 +386,16 @@ async def get_transaction_list(target_date: date | None = None) -> list[dict[str
 
 async def get_inventory_levels() -> dict[str, Any]:
     """Fetch current tracked inventory levels from NRS."""
-    token = await _authenticate()
-    merchant = await _get_inventory_raw(token)
+    token = await _get_token()
+    try:
+        merchant = await _get_inventory_raw(token)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            await clear_cached_token(settings.store_id)
+            raise NRSTokenExpiredError(
+                "NRS session expired. Send /token <value> in Telegram to set a new one."
+            ) from e
+        raise
 
     items = []
     low_stock_count = 0

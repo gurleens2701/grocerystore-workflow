@@ -35,7 +35,7 @@ from db.ops import log_message, save_daily_sales, save_expense, save_invoice, sa
 from db.state import clear_state, get_state, save_state
 from tools.intent_router import classify_message
 from tools.invoice_extractor import extract_invoice_from_photo
-from tools.nrs_tools import fetch_daily_sales, fetch_inventory
+from tools.nrs_tools import fetch_daily_sales, fetch_inventory, save_cached_token
 from tools.price_lookup import compile_order, lookup_item_price, parse_order_list
 from tools.health_score import _build_health_score_async, send_weekly_health_score
 from tools.onboarding import (
@@ -1777,6 +1777,28 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # Build and return the Application
 # ---------------------------------------------------------------------------
 
+async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /token <value> — saves a manually-provided NRS session token."""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /token <value>\n\nTo get the token:\n"
+            "1. Open NRS portal in your browser and log in\n"
+            "2. Open DevTools (F12) → Network tab\n"
+            "3. Refresh or click around — find a request to pos-papi.nrsplus.com/auth/authenticate\n"
+            "4. Click it → Response tab → copy the value of data.token\n"
+            "   It looks like: u56967-abc123...\n\n"
+            "Then send: /token u56967-abc123...",
+            parse_mode=None,
+        )
+        return
+    token = context.args[0].strip()
+    await save_cached_token(settings.store_id, token)
+    await update.message.reply_text(
+        f"✅ NRS token saved. Send /daily to test it.",
+        parse_mode=None,
+    )
+
+
 def build_app() -> Application:
     app = Application.builder().token(settings.telegram_bot_token).build()
 
@@ -1816,6 +1838,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("bank", cmd_bank))
     app.add_handler(CommandHandler("language", cmd_language))
+    app.add_handler(CommandHandler("token", cmd_token))
     app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^bk:"))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
