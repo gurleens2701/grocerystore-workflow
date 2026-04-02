@@ -93,6 +93,7 @@ def _create_link_token_sync(store_id: str) -> str:
         country_codes=[CountryCode("US")],
         language="en",
         redirect_uri="https://clerkai.live/bank",
+        link_customization_name="finances",
     )
     resp = client.link_token_create(LinkTokenCreateRequest(**req))
     return resp["link_token"]
