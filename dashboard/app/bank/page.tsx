@@ -222,7 +222,9 @@ export default function BankPage() {
   const [loading, setLoading]           = useState(true)
   const [syncing, setSyncing]           = useState(false)
   const [exchanging, setExchanging]     = useState(false)
-  const [showPlaid, setShowPlaid]       = useState(false)
+  const [showPlaid, setShowPlaid]       = useState(() =>
+    typeof window !== 'undefined' && window.location.href.includes('oauth_state_id')
+  )
   const [showDisconnect, setShowDisconnect] = useState(false)
   const [disconnecting, setDisconnecting]   = useState(false)
   const [error, setError]               = useState('')
