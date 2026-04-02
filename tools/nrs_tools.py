@@ -26,11 +26,19 @@ log = logging.getLogger(__name__)
 _STATE_NRS_TOKEN = "nrs_token"
 
 
-async def get_cached_token(store_id: str) -> str | None:
-    """Return the manually-saved NRS token, or None if not set."""
-    from db.state import get_state
-    state = await get_state(store_id, _STATE_NRS_TOKEN)
-    return state.get("token") if state else None
+def get_cached_token(store_id: str) -> str | None:
+    """Return the manually-saved NRS token synchronously (safe to call from any thread/loop)."""
+    from db.database import get_sync_session
+    from db.models import PendingState
+    from sqlalchemy import select
+    with get_sync_session() as session:
+        row = session.execute(
+            select(PendingState).where(
+                PendingState.store_id == store_id,
+                PendingState.state_key == _STATE_NRS_TOKEN,
+            )
+        ).scalar_one_or_none()
+        return row.state_data.get("token") if row else None
 
 
 async def save_cached_token(store_id: str, token: str) -> None:
@@ -39,10 +47,18 @@ async def save_cached_token(store_id: str, token: str) -> None:
     await save_state(store_id, _STATE_NRS_TOKEN, {"token": token})
 
 
-async def clear_cached_token(store_id: str) -> None:
-    """Remove the cached token (called when NRS returns 401)."""
-    from db.state import clear_state
-    await clear_state(store_id, _STATE_NRS_TOKEN)
+def clear_cached_token_sync(store_id: str) -> None:
+    """Remove the cached token synchronously (safe to call from any thread/loop)."""
+    from db.database import get_sync_session
+    from db.models import PendingState
+    from sqlalchemy import delete
+    with get_sync_session() as session:
+        session.execute(
+            delete(PendingState).where(
+                PendingState.store_id == store_id,
+                PendingState.state_key == _STATE_NRS_TOKEN,
+            )
+        )
 
 # NRS Plus portal constants
 _BASE_URL = "https://mystore.nrsplus.com"
@@ -59,9 +75,8 @@ async def _get_token() -> str:
     """
     Return a valid NRS session token.
     Uses the manually-cached token if available; falls back to Playwright login.
-    Raises NRSTokenExpiredError if the cached token is stale (caller should clear it).
     """
-    token = await get_cached_token(settings.store_id)
+    token = get_cached_token(settings.store_id)
     if token:
         log.info("Using cached NRS token.")
         return token
@@ -220,7 +235,7 @@ async def get_daily_sales(target_date: date | None = None) -> dict[str, Any]:
         data = await _get_stats(token, target_date)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            await clear_cached_token(settings.store_id)
+            clear_cached_token_sync(settings.store_id)
             raise NRSTokenExpiredError(
                 "NRS session expired. Send /token <value> in Telegram to set a new one."
             ) from e
@@ -354,7 +369,7 @@ async def get_transaction_list(target_date: date | None = None) -> list[dict[str
         data = await _get_stats(token, target_date)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            await clear_cached_token(settings.store_id)
+            clear_cached_token_sync(settings.store_id)
             raise NRSTokenExpiredError(
                 "NRS session expired. Send /token <value> in Telegram to set a new one."
             ) from e
@@ -391,7 +406,7 @@ async def get_inventory_levels() -> dict[str, Any]:
         merchant = await _get_inventory_raw(token)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            await clear_cached_token(settings.store_id)
+            clear_cached_token_sync(settings.store_id)
             raise NRSTokenExpiredError(
                 "NRS session expired. Send /token <value> in Telegram to set a new one."
             ) from e
