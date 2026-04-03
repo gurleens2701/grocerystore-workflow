@@ -27,6 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from bot import build_app, scheduled_daily
+from tools.health_score import send_weekly_health_score
 from config.settings import settings
 from tools.sync import run_nightly_sync
 
@@ -62,6 +63,18 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
         trigger=IntervalTrigger(minutes=15),
         id="nightly_sync",
         name="Nightly Sheets → PostgreSQL Sync",
+        replace_existing=True,
+    )
+
+    # Weekly health score — every Monday at 8:00 AM
+    async def _weekly_health(app=app):
+        await send_weekly_health_score(settings.store_id, app.bot, settings.telegram_chat_id)
+
+    scheduler.add_job(
+        _weekly_health,
+        trigger=CronTrigger(day_of_week="mon", hour=8, minute=0, timezone=tz),
+        id="weekly_health_score",
+        name="Weekly Health Score",
         replace_existing=True,
     )
 

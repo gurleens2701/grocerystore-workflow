@@ -532,7 +532,7 @@ async def scheduled_daily(app: Application) -> None:
             log.info("Scheduled daily fetch complete — waiting for right-side input via Telegram.")
 
     # Bank sync + reconcile (if connected)
-    from tools.plaid_tools import is_connected, sync_transactions
+    from tools.plaid_tools import is_connected, sync_transactions, fetch_accounts
     try:
         if await is_connected(settings.store_id):
             result = await sync_transactions(settings.store_id)
@@ -557,8 +557,33 @@ async def scheduled_daily(app: Application) -> None:
                     await send_cc_mismatch_alert(bot, mm)
                 except Exception as e:
                     log.warning("CC mismatch alert failed: %s", e)
+
+            # ── Negative balance alert ────────────────────────────────────
+            try:
+                accounts = await fetch_accounts(settings.store_id)
+                for acct in accounts:
+                    balance = acct.get("available") if acct.get("available") is not None else acct.get("current", 0)
+                    if balance < 0:
+                        await bot.send_message(
+                            chat_id=settings.telegram_chat_id,
+                            text=(
+                                f"🚨 *Negative Bank Balance*\n"
+                                f"{acct['name']}: *${balance:,.2f}*\n\n"
+                                "Check your account — you may have overdraft fees coming."
+                            ),
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+            except Exception as e:
+                log.warning("Balance check failed: %s", e)
+
     except Exception as e:
         log.warning("Scheduled bank sync failed: %s", e)
+
+    # ── Stale review reminder (transactions needing review > 2 days old) ──
+    try:
+        await _send_stale_review_reminder(bot)
+    except Exception as e:
+        log.warning("Stale review reminder failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1819,6 +1844,42 @@ async def send_cc_mismatch_alert(bot: Bot, mismatch: dict) -> None:
         text=text,
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+async def _send_stale_review_reminder(bot: Bot) -> None:
+    """
+    If there are bank transactions stuck in needs_review for > 2 days, remind the owner.
+    Runs daily after the bank sync.
+    """
+    from db.database import get_async_session
+    from db.models import BankTransaction
+    from sqlalchemy import select, func
+    from datetime import datetime, timezone
+
+    cutoff = date.today() - timedelta(days=2)
+    async with get_async_session() as session:
+        result = await session.execute(
+            select(func.count())
+            .select_from(BankTransaction)
+            .where(
+                BankTransaction.store_id == settings.store_id,
+                BankTransaction.review_status == "needs_review",
+                BankTransaction.date <= str(cutoff),
+            )
+        )
+        stale_count = result.scalar() or 0
+
+    if stale_count > 0:
+        await bot.send_message(
+            chat_id=settings.telegram_chat_id,
+            text=(
+                f"🔔 *{stale_count} bank transaction{'s' if stale_count > 1 else ''} "
+                f"waiting for review* (2+ days old)\n\n"
+                f"Reply to each one or visit your dashboard:\n"
+                f"http://178.104.61.18/bank"
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
 
 async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
