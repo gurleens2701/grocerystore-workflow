@@ -12,7 +12,7 @@ gspread>=6.0.0
 google-auth>=2.0.0
 
 # Telegram bot
-python-telegram-bot>=21.0.0
+python-telegram-bot[webhooks]>=21.0.0
 
 # Scheduling (asyncio scheduler for bot integration)
 apscheduler>=3.10.0
