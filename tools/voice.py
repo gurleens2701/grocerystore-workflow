@@ -49,7 +49,7 @@ def transcribe_voice(audio_bytes: bytes, language_code: str | None = None) -> st
         )
 
     from openai import OpenAI
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=60.0)
 
     audio_file = io.BytesIO(audio_bytes)
     audio_file.name = "voice.ogg"

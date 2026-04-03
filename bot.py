@@ -1454,8 +1454,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         voice = update.message.voice
-        file = await context.bot.get_file(voice.file_id)
-        audio_bytes = bytes(await file.download_as_bytearray())
+        file = await context.bot.get_file(voice.file_id, read_timeout=60, write_timeout=60, connect_timeout=30)
+        audio_bytes = bytes(await file.download_as_bytearray(read_timeout=60, write_timeout=60, connect_timeout=30))
 
         # Transcribe
         text = await asyncio.get_event_loop().run_in_executor(
