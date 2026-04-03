@@ -157,9 +157,11 @@ def _fmt_left(sales: dict[str, Any]) -> str:
 
 def _prompt_for_right_side() -> str:
     return (
-        "\n\n📋 *Please reply with the right-side numbers:*\n"
+        "\n\n📋 *Please reply with these numbers:*\n"
         "_(Enter 0 if none)_\n\n"
         "```\n"
+        "IN. LOTTO:   \n"
+        "ON. LINE:    \n"
         "LOTTO PO:    \n"
         "LOTTO CR:    \n"
         "FOOD STAMP:  \n"
@@ -333,12 +335,12 @@ def _build_preview(sales: dict) -> str:
 
 def _parse_right_side(text: str) -> dict[str, float] | None:
     """
-    Parse user's right-side input for the 3 manual fields.
+    Parse user's right-side input for the 5 manual fields.
     Accepts formats like:
-      LOTTO PO: 132
-      lotto cr 31
+      IN. LOTTO: 208
+      lotto po: 132
       food stamp: 0
-    Or a plain list of 3 numbers (in order: lotto_po, lotto_cr, food_stamp).
+    Or a plain list of 5 numbers (in order: lotto_in, lotto_online, lotto_po, lotto_cr, food_stamp).
     Returns None if parsing fails.
     """
     def to_float(s: str) -> float:
@@ -348,9 +350,11 @@ def _parse_right_side(text: str) -> dict[str, float] | None:
             return 0.0
 
     keys_map = {
-        "lotto_po": ["lotto po", "lotto p.o", "lottopo", "lotto payout", "payout"],
-        "lotto_cr": ["lotto cr", "lottocr", "lotto credit"],
-        "food_stamp": ["food stamp", "foodstamp", "ebt", "food stamps"],
+        "lotto_in":     ["in. lotto", "in lotto", "instant lotto", "instant lottery", "in.lotto"],
+        "lotto_online": ["on. line", "on line", "online lotto", "online lottery", "online"],
+        "lotto_po":     ["lotto po", "lotto p.o", "lottopo", "lotto payout", "payout"],
+        "lotto_cr":     ["lotto cr", "lottocr", "lotto credit", "lotto cr."],
+        "food_stamp":   ["food stamp", "foodstamp", "ebt", "food stamps", "snap"],
     }
 
     result: dict[str, float] = {}
@@ -358,19 +362,20 @@ def _parse_right_side(text: str) -> dict[str, float] | None:
 
     for key, aliases in keys_map.items():
         for alias in aliases:
-            # Match "alias: 123" or "alias 123"
             pattern = re.escape(alias) + r"[\s:]*(\d+\.?\d*)"
             m = re.search(pattern, text_lower)
             if m:
                 result[key] = to_float(m.group(1))
                 break
-        if key not in result:
-            result[key] = 0.0
 
-    # If no key matched at all, try plain number list (3 numbers)
-    if not any(result.values()):
+    # If no key matched at all, try plain number list (5 or 3 numbers)
+    if not result:
         nums = re.findall(r"\d+\.?\d*", text)
-        if len(nums) == 3:
+        if len(nums) == 5:
+            order = ["lotto_in", "lotto_online", "lotto_po", "lotto_cr", "food_stamp"]
+            result = {k: to_float(v) for k, v in zip(order, nums)}
+        elif len(nums) == 3:
+            # Legacy: just the 3 original fields
             order = ["lotto_po", "lotto_cr", "food_stamp"]
             result = {k: to_float(v) for k, v in zip(order, nums)}
         else:
@@ -406,7 +411,7 @@ async def _do_daily_fetch(bot: Bot, chat_id: str) -> bool:
             f"cash_drop=${sales.get('cash_drop', 0):.2f}, "
             f"card=${sales.get('card', 0):.2f}, "
             f"atm=${sales.get('atm', 0):.2f}. "
-            f"Still waiting for owner to enter: LOTTO PO (lottery payout), LOTTO CR (lottery credit), FOOD STAMP."
+            f"Still waiting for owner to enter: IN. LOTTO, ON. LINE, LOTTO PO, LOTTO CR, FOOD STAMP."
         )
         hist = await _load_history(settings.store_id)
         hist.append({"role": "assistant", "content": summary})
@@ -470,7 +475,7 @@ async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if right is None:
         await update.message.reply_text(
             "⚠️ Could not parse numbers. Please use format:\n"
-            "LOTTO PO: 39\nLOTTO CR: 0\nFOOD STAMP: 0",
+            "IN. LOTTO: 208\nON. LINE: 4\nLOTTO PO: 39\nLOTTO CR: 0\nFOOD STAMP: 0",
             parse_mode=None,
         )
         return AWAITING_RIGHT_SIDE  # stay in state, ask again
@@ -1336,7 +1341,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
                 f"cash_drop=${pending_sales.get('cash_drop', 0):.2f}, "
                 f"card=${pending_sales.get('card', 0):.2f}. "
                 f"To finalize the report, the owner must reply with: "
-                f"LOTTO PO: X / LOTTO CR: Y / FOOD STAMP: Z]\n\n"
+                f"IN. LOTTO: X / ON. LINE: X / LOTTO PO: X / LOTTO CR: Y / FOOD STAMP: Z]\n\n"
                 f"Owner says: {text}"
             )
 
