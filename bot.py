@@ -172,11 +172,13 @@ def _prompt_for_right_side() -> str:
 def _build_complete_sheet(sales: dict[str, Any], right: dict[str, float]) -> str:
     """Build the full daily sheet with over/short."""
     product_sales = sales.get("product_sales", 0)
-    lotto_in = sales.get("lotto_in", 0)
-    lotto_online = sales.get("lotto_online", 0)
+    # Prefer user-supplied values over NRS auto values
+    lotto_in     = right.get("lotto_in",    sales.get("lotto_in",    0))
+    lotto_online = right.get("lotto_online", sales.get("lotto_online", 0))
     sales_tax = sales.get("sales_tax", 0)
     gpi = sales.get("gpi", 0)
-    grand_total = sales.get("grand_total", 0)  # already calculated
+    # Recalculate grand total using the (possibly overridden) lotto values
+    grand_total = round(product_sales + lotto_in + lotto_online + sales_tax + gpi, 2)
 
     # From NRS API
     cash = sales.get("cash_drops", 0)  # safe drop, not total cash received
@@ -326,9 +328,11 @@ Examples:
 def _build_preview(sales: dict) -> str:
     """Build a live preview of the complete daily sheet from the current sales state."""
     right = {
-        "lotto_po":   sales.get("lotto_po", 0),
-        "lotto_cr":   sales.get("lotto_cr", 0),
-        "food_stamp": sales.get("food_stamp", 0),
+        "lotto_in":    sales.get("lotto_in",    0),
+        "lotto_online": sales.get("lotto_online", 0),
+        "lotto_po":    sales.get("lotto_po",    0),
+        "lotto_cr":    sales.get("lotto_cr",    0),
+        "food_stamp":  sales.get("food_stamp",  0),
     }
     return _build_complete_sheet(sales, right)
 
