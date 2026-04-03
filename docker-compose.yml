@@ -30,6 +30,8 @@ services:
     env_file: .env
     environment:
       STORE_ID: moraine
+    expose:
+      - "8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +80,7 @@ services:
     depends_on:
       - api
       - dashboard
+      - app
 
 volumes:
   postgres_data:

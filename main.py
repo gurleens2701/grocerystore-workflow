@@ -6,17 +6,12 @@ At 7:00 AM every day the bot fetches NRS data and sends the left-side
 daily sheet to Telegram, then waits for you to provide the right-side
 numbers (lotto payout, ATM, etc.) to complete the sheet.
 
-At midnight every day the nightly sync runs: reads Google Sheets and
-reconciles any manual owner edits back to PostgreSQL.
+Telegram updates are received via webhook (POST /telegram-webhook)
+rather than polling — eliminates Telegram Conflict errors.
 
-Telegram commands:
-  /daily  — manually trigger the daily fetch
-
-Run now (for testing):  python main.py --now
-Run on schedule:        python main.py
+Run: python main.py
 """
 
-import argparse
 import asyncio
 import logging
 import signal
@@ -37,25 +32,28 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+WEBHOOK_PATH = "/telegram-webhook"
+WEBHOOK_PORT = 8080
+WEBHOOK_URL  = f"https://clerkai.live{WEBHOOK_PATH}"
 
-async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None:
+
+async def run_bot() -> None:
     app = build_app()
 
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
-
     tz = settings.timezone
 
     # Daily NRS fetch — 7:00 AM store timezone
     scheduler.add_job(
         scheduled_daily,
         args=[app],
-        trigger=CronTrigger(hour=hour, minute=minute, timezone=tz),
+        trigger=CronTrigger(hour=7, minute=0, timezone=tz),
         id="daily_fetch",
         name="Daily NRS Fetch",
         replace_existing=True,
     )
 
-    # Sheets → PostgreSQL sync every 15 minutes (catches manual edits fast)
+    # Sheets → PostgreSQL sync every 15 minutes
     scheduler.add_job(
         run_nightly_sync,
         args=[settings.store_id],
@@ -76,7 +74,6 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
         replace_existing=True,
     )
 
-
     async with app:
         await app.start()
 
@@ -92,18 +89,17 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
             )
             await clear_state(settings.store_id, "pending_alerts")
 
-        if run_now:
-            log.info("--now flag: running daily fetch immediately.")
-            await scheduled_daily(app)
-        else:
-            log.info(
-                "Bot started. Daily fetch at %02d:%02d %s. Nightly sync at 00:00. "
-                "Send /daily in Telegram to trigger manually.",
-                hour, minute, settings.timezone,
-            )
-
         scheduler.start()
-        await app.updater.start_polling(drop_pending_updates=False)
+
+        # Start webhook server — Telegram pushes updates to WEBHOOK_URL
+        await app.updater.start_webhook(
+            listen="0.0.0.0",
+            port=WEBHOOK_PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=WEBHOOK_URL,
+            drop_pending_updates=True,
+        )
+        log.info("Webhook active: %s → listening on port %d", WEBHOOK_URL, WEBHOOK_PORT)
 
         stop_event = asyncio.Event()
 
@@ -123,15 +119,5 @@ async def run_bot(hour: int = 7, minute: int = 0, run_now: bool = False) -> None
             await app.stop()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Gas Station Telegram Bot")
-    parser.add_argument("--now", action="store_true", help="Trigger daily fetch immediately on startup")
-    parser.add_argument("--hour", type=int, default=7, help="Hour to run daily (24h, default: 7)")
-    parser.add_argument("--minute", type=int, default=0, help="Minute to run daily (default: 0)")
-    args = parser.parse_args()
-
-    asyncio.run(run_bot(hour=args.hour, minute=args.minute, run_now=args.now))
-
-
 if __name__ == "__main__":
-    main()
+    asyncio.run(run_bot())
