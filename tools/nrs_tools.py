@@ -116,14 +116,31 @@ async def _authenticate() -> str:
         )
         page = await context.new_page()
 
+        import re as _re
+
         async def _capture(response: Any) -> None:
             nonlocal token
-            if "authenticate" in response.url and response.status == 200:
+            if token:
+                return
+            url = response.url
+            # Primary: explicit /auth/authenticate endpoint
+            if "authenticate" in url and response.status == 200:
                 try:
                     data = await response.json()
-                    token = data.get("data", {}).get("token")
+                    t = data.get("data", {}).get("token")
+                    if t:
+                        token = t
+                        return
                 except Exception:
                     pass
+            # Fallback: any pos-papi call — extract token from URL path segment
+            if "pos-papi.nrsplus.com" in url and response.status == 200:
+                m = _re.search(r"pos-papi\.nrsplus\.com/([^/]+)/", url)
+                if m:
+                    candidate = m.group(1)
+                    # Token looks like "u56967-hexhex…" — at least 10 chars, contains "-"
+                    if len(candidate) >= 10 and "-" in candidate:
+                        token = candidate
 
         page.on("response", _capture)
 
@@ -145,8 +162,8 @@ async def _authenticate() -> str:
         except Exception:
             pass
 
-        # Wait up to 30s for the auth token to be captured
-        for _ in range(60):
+        # Wait up to 45s for the auth token to be captured
+        for _ in range(90):
             if token:
                 break
             await asyncio.sleep(0.5)
@@ -156,6 +173,7 @@ async def _authenticate() -> str:
 
     if not token:
         raise RuntimeError("NRS authentication failed — token not captured")
+    log.info("NRS token captured: %s…", token[:12])
     return token
 
 
