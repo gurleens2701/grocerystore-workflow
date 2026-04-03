@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from sqlalchemy import and_, select, func
 
@@ -653,11 +653,13 @@ Today is {today}. Store: {store_name}.{owner_line}\
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_agent(question: str, store_id: str, owner_name: str = "") -> str:
+def run_agent(question: str, store_id: str, owner_name: str = "",
+              history: list[dict] | None = None) -> str:
     """
     Handle any user message — reads from DB, writes to DB + Sheets, or just chats.
     Blocking — call via run_in_executor from async context.
 
+    history: list of {"role": "user"|"assistant", "content": str} — recent conversation.
     store_id is accepted for future multi-store support; currently settings.store_id
     is used inside individual tools (they read from settings directly).
     """
@@ -668,14 +670,22 @@ def run_agent(question: str, store_id: str, owner_name: str = "") -> str:
 
     owner_line = f" The owner's name is {owner_name} — use their name occasionally to be friendly." if owner_name else ""
 
-    messages = [
+    messages: list = [
         SystemMessage(content=_SYSTEM.format(
             today=date.today(),
             store_name=settings.store_name,
             owner_line=owner_line,
         )),
-        HumanMessage(content=question),
     ]
+
+    # Inject prior conversation so the AI remembers context
+    for msg in (history or [])[-20:]:
+        if msg["role"] == "user":
+            messages.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == "assistant":
+            messages.append(AIMessage(content=msg["content"]))
+
+    messages.append(HumanMessage(content=question))
 
     for _ in range(8):  # max rounds of tool calls
         response = llm.invoke(messages)

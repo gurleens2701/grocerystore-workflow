@@ -63,6 +63,23 @@ _STATE_SALES = "sales"
 _STATE_INVOICE_ITEMS = "invoice_items"   # pending extracted line items awaiting user confirmation
 _STATE_AWAITING_REPORT = "awaiting_daily_report"  # manual mode: waiting for the report photo
 _STATE_REPORT_DRAFT = "daily_report_draft"        # manual mode: OCR done, some fields still missing
+_STATE_CHAT_HISTORY = "chat_history"              # rolling conversation history (last 20 messages)
+
+_HISTORY_MAX = 20  # max messages to keep (10 back-and-forth exchanges)
+
+
+async def _load_history(store_id: str) -> list[dict]:
+    """Load conversation history from DB state."""
+    return await get_state(store_id, _STATE_CHAT_HISTORY) or []
+
+
+async def _save_history(store_id: str, history: list[dict],
+                        user_text: str, bot_reply: str) -> None:
+    """Append a user/assistant exchange to history and persist (capped at _HISTORY_MAX)."""
+    history = list(history)
+    history.append({"role": "user",      "content": user_text})
+    history.append({"role": "assistant", "content": bot_reply})
+    await save_state(store_id, _STATE_CHAT_HISTORY, history[-_HISTORY_MAX:])
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +314,24 @@ async def _do_daily_fetch(bot: Bot, chat_id: str) -> bool:
         msg = _fmt_left(sales) + _prompt_for_right_side()
         await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
         asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", msg))
+
+        # Save daily report summary to history so follow-up questions have context
+        summary = (
+            f"I sent the daily sales report for {sales.get('date', 'today')}. "
+            f"NRS data: product_sales=${sales.get('product_sales', 0):.2f}, "
+            f"instant_lotto=${sales.get('lotto_in', 0):.2f}, "
+            f"online_lotto=${sales.get('lotto_online', 0):.2f}, "
+            f"sales_tax=${sales.get('sales_tax', 0):.2f}, "
+            f"gpi=${sales.get('gpi', 0):.2f}, "
+            f"grand_total=${sales.get('grand_total', 0):.2f}, "
+            f"cash_drop=${sales.get('cash_drop', 0):.2f}, "
+            f"card=${sales.get('card', 0):.2f}, "
+            f"atm=${sales.get('atm', 0):.2f}. "
+            f"Still waiting for owner to enter: LOTTO PO (lottery payout), LOTTO CR (lottery credit), FOOD STAMP."
+        )
+        hist = await _load_history(settings.store_id)
+        hist.append({"role": "assistant", "content": summary})
+        await save_state(settings.store_id, _STATE_CHAT_HISTORY, hist[-_HISTORY_MAX:])
         return True
     except Exception as e:
         log.error("Daily fetch failed: %s", e, exc_info=True)
@@ -1145,12 +1180,39 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             await _do_daily_fetch(context.bot, settings.telegram_chat_id)
     else:
         from tools.main_agent import run_agent
+
+        # Load conversation history for context
+        history = await _load_history(settings.store_id)
+
+        # If there's a pending daily report, include its data as context
+        # so follow-up questions ("change lotto payout", "what was my card?") work
+        pending_sales = await get_state(settings.store_id, _STATE_SALES)
+        question = text
+        if pending_sales:
+            question = (
+                f"[Context: There is a pending daily sales report for {pending_sales.get('date', 'today')} "
+                f"waiting for LOTTO PO, LOTTO CR, and FOOD STAMP manual inputs. "
+                f"NRS auto-filled: product_sales=${pending_sales.get('product_sales', 0):.2f}, "
+                f"instant_lotto=${pending_sales.get('lotto_in', 0):.2f}, "
+                f"online_lotto=${pending_sales.get('lotto_online', 0):.2f}, "
+                f"sales_tax=${pending_sales.get('sales_tax', 0):.2f}, "
+                f"gpi=${pending_sales.get('gpi', 0):.2f}, "
+                f"grand_total=${pending_sales.get('grand_total', 0):.2f}, "
+                f"cash_drop=${pending_sales.get('cash_drop', 0):.2f}, "
+                f"card=${pending_sales.get('card', 0):.2f}. "
+                f"To finalize the report, the owner must reply with: "
+                f"LOTTO PO: X / LOTTO CR: Y / FOOD STAMP: Z]\n\n"
+                f"Owner says: {text}"
+            )
+
         try:
             reply = await asyncio.get_event_loop().run_in_executor(
-                None, run_agent, text, settings.store_id, owner_name
+                None, run_agent, question, settings.store_id, owner_name, history
             )
             await update.message.reply_text(reply, parse_mode=None)
             asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", reply))
+            # Save exchange to history (use original text, not injected context)
+            asyncio.create_task(_save_history(settings.store_id, history, text, reply))
         except Exception as e:
             log.error("Agent failed: %s", e, exc_info=True)
             await update.message.reply_text(f"⚠️ Something went wrong: {e}", parse_mode=None)
