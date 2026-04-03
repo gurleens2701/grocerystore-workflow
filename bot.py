@@ -414,9 +414,22 @@ async def _do_daily_fetch(bot: Bot, chat_id: str) -> bool:
         return True
     except Exception as e:
         log.error("Daily fetch failed: %s", e, exc_info=True)
-        err = f"❌ Error fetching data: {e}"
-        await bot.send_message(chat_id=chat_id, text=err, parse_mode=None)
-        asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", err))
+        err_text = str(e)
+        if "token not captured" in err_text or "NRS authentication" in err_text or "401" in err_text:
+            msg = (
+                "❌ NRS login failed (reCAPTCHA blocked the auto-login).\n\n"
+                "To fix — grab your token from the browser:\n"
+                "1. Open https://mystore.nrsplus.com in Chrome and log in\n"
+                "2. Press F12 → Network tab\n"
+                "3. Look for any request to *pos-papi.nrsplus.com*\n"
+                "4. Copy the long segment after .com/ that looks like `u56967-abc123...`\n\n"
+                "Then send:\n`/token u56967-abc123...`\n\n"
+                "After that, /daily will work again."
+            )
+        else:
+            msg = f"❌ Error fetching data: {err_text}"
+        await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
+        asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", msg))
         return False
 
 
@@ -2016,12 +2029,15 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /token <value> — saves a manually-provided NRS session token."""
     if not context.args:
         await update.message.reply_text(
-            "Usage: /token <value>\n\nTo get the token:\n"
-            "1. Open NRS portal in your browser and log in\n"
-            "2. Open DevTools (F12) → Network tab\n"
-            "3. Refresh or click around — find a request to pos-papi.nrsplus.com/auth/authenticate\n"
-            "4. Click it → Response tab → copy the value of data.token\n"
-            "   It looks like: u56967-abc123...\n\n"
+            "Usage: /token <value>\n\n"
+            "How to get your token:\n"
+            "1. Open https://mystore.nrsplus.com in Chrome and log in\n"
+            "2. Press F12 → click the Network tab\n"
+            "3. Click any request listed — look for one whose URL contains pos-papi.nrsplus.com\n"
+            "4. The URL looks like:\n"
+            "   pos-papi.nrsplus.com/u56967-abc123.../pcrhist/...\n"
+            "   Copy the segment between .com/ and the next /\n"
+            "   (starts with u56967- followed by letters and numbers)\n\n"
             "Then send: /token u56967-abc123...",
             parse_mode=None,
         )
