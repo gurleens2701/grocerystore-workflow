@@ -251,7 +251,8 @@ async def reconcile_new_transactions(store_id: str) -> dict:
         )).scalars().all()
 
         needs_review = []
-        auto_count = 0
+        auto_list    = []
+        auto_count   = 0
 
         for txn in pending:
             desc   = txn.description
@@ -264,6 +265,8 @@ async def reconcile_new_transactions(store_id: str) -> dict:
                 txn.reconcile_type       = rule["reconcile_type"]
                 txn.reconcile_subcategory = rule["reconcile_subcategory"]
                 auto_count += 1
+                auto_list.append(_txn_to_dict(txn, confidence=rule["confidence"],
+                                              ai_guess=rule["reconcile_type"]))
                 continue
 
             # 2. Google Sheet smart matching
@@ -278,6 +281,8 @@ async def reconcile_new_transactions(store_id: str) -> dict:
                 await _highlight_sheet_match(sheet_match)
                 await _upsert_rule(store_id, desc, sheet_match["match_type"],
                                    sheet_match["vendor"], confirmed=True, session=session)
+                auto_list.append(_txn_to_dict(txn, confidence=0.95,
+                                              ai_guess=sheet_match["match_type"]))
                 continue
 
             if sheet_match and sheet_match.get("proposed"):
@@ -302,6 +307,7 @@ async def reconcile_new_transactions(store_id: str) -> dict:
                     txn.reconcile_subcategory = subcat
                     auto_count += 1
                     await _upsert_rule(store_id, desc, rtype, subcat, confirmed=False, session=session)
+                    auto_list.append(_txn_to_dict(txn, confidence=confidence, ai_guess=rtype))
                 else:
                     txn.review_status        = "needs_review"
                     txn.reconcile_type       = rtype
@@ -323,7 +329,12 @@ async def reconcile_new_transactions(store_id: str) -> dict:
         "Reconcile store=%s auto=%d needs_review=%d cc_mismatches=%d",
         store_id, auto_count, len(needs_review), len(cc_mismatches),
     )
-    return {"needs_review": needs_review, "cc_mismatches": cc_mismatches, "auto_classified": auto_count}
+    return {
+        "needs_review":      needs_review,
+        "auto_classified":   auto_count,
+        "auto_list":         auto_list,
+        "cc_mismatches":     cc_mismatches,
+    }
 
 
 def _txn_to_dict(txn: Any, confidence: float = 0.0, ai_guess: str = "") -> dict:
@@ -469,6 +480,41 @@ async def skip_transaction(store_id: str, txn_id: int) -> bool:
         description = txn.description
 
     await learn_rule(store_id, description, "skip", None)
+    return True
+
+
+async def confirm_auto_transaction(store_id: str, txn_id: int) -> bool:
+    """
+    Confirm an auto-classified transaction as-is (user tapped ✅ Correct).
+    Promotes review_status from 'auto' → 'confirmed' and reinforces the rule.
+    """
+    from sqlalchemy import select
+    from db.database import get_async_session
+    from db.models import BankTransaction
+
+    async with get_async_session() as session:
+        txn = (await session.execute(
+            select(BankTransaction).where(
+                BankTransaction.id == txn_id,
+                BankTransaction.store_id == store_id,
+            )
+        )).scalar_one_or_none()
+
+        if not txn:
+            return False
+
+        reconcile_type = txn.reconcile_type
+        subcategory    = txn.reconcile_subcategory
+        description    = txn.description
+        amount         = float(txn.amount)
+        txn_date       = txn.transaction_date
+
+        txn.review_status     = "confirmed"
+        txn.last_updated_by   = "user"
+        await session.commit()
+
+    await learn_rule(store_id, description, reconcile_type, subcategory)
+    await _auto_log(store_id, txn_id, txn_date, amount, description, reconcile_type, subcategory)
     return True
 
 

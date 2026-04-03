@@ -546,6 +546,7 @@ async def scheduled_daily(app: Application) -> None:
         if await is_connected(settings.store_id):
             result = await sync_transactions(settings.store_id)
             needs_review  = result.get("needs_review", [])
+            auto_list     = result.get("auto_list", [])
             cc_mismatches = result.get("cc_mismatches", [])
             paid_invoices = result.get("paid_invoices", [])
 
@@ -560,6 +561,12 @@ async def scheduled_daily(app: Application) -> None:
                     await send_bank_review_request(bot, txn)
                 except Exception as e:
                     log.warning("Review request failed for txn %s: %s", txn.get("id"), e)
+
+            for txn in auto_list[:8]:
+                try:
+                    await send_bank_auto_review(bot, txn)
+                except Exception as e:
+                    log.warning("Auto review send failed for txn %s: %s", txn.get("id"), e)
 
             for mm in cc_mismatches:
                 try:
@@ -1836,6 +1843,36 @@ async def send_bank_review_request(bot: Bot, txn: dict) -> None:
     )
 
 
+async def send_bank_auto_review(bot: Bot, txn: dict) -> None:
+    """Send an auto-classified transaction with ✅ Correct / ✏️ Change buttons."""
+    direction  = "OUT" if txn["amount"] > 0 else "IN"
+    emoji      = "💸" if txn["amount"] > 0 else "💰"
+    desc       = txn["description"][:40]
+    amount     = abs(txn["amount"])
+    ai_guess   = txn.get("ai_guess", "unknown")
+    confidence = txn.get("confidence", 0.0)
+
+    text = (
+        f"{emoji} *Auto-classified transaction*\n"
+        f"{'─'*32}\n"
+        f"  {txn['date']}  [{direction}]\n"
+        f"  {desc}\n"
+        f"  *${amount:,.2f}*\n\n"
+        f"  Category: *{ai_guess}* ({confidence*100:.0f}% confidence)\n"
+        f"  Is this correct?"
+    )
+    keyboard = [[
+        InlineKeyboardButton("✅ Correct", callback_data=f"bk_ok:{txn['id']}"),
+        InlineKeyboardButton("✏️ Change", callback_data=f"bk_change:{txn['id']}"),
+    ]]
+    await bot.send_message(
+        chat_id=settings.telegram_chat_id,
+        text=text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 async def send_cc_mismatch_alert(bot: Bot, mismatch: dict) -> None:
     """Notify owner of a CC settlement vs daily card total mismatch."""
     diff = mismatch["diff"]
@@ -1935,6 +1972,29 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             ]
             await query.edit_message_text(
                 "Ok — what category is this transaction?",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=None,
+            )
+        return
+
+    # ── Auto-classified: Correct / Change ────────────────────────────────────
+    if data.startswith("bk_ok:") or data.startswith("bk_change:"):
+        prefix, txn_id_str = data.split(":", 1)
+        txn_id = int(txn_id_str)
+
+        if prefix == "bk_ok":
+            # User confirms the auto-classification — mark as confirmed
+            from tools.bank_reconciler import confirm_auto_transaction
+            await confirm_auto_transaction(store_id, txn_id)
+            await query.edit_message_text("✅ Confirmed. I'll remember this for future transactions.", parse_mode=None)
+        else:
+            # User wants to change — show full category keyboard
+            keyboard = [
+                [InlineKeyboardButton(label, callback_data=f"bk:{rtype}:{txn_id}")]
+                for label, rtype in _REVIEW_TYPES
+            ]
+            await query.edit_message_text(
+                "What category should this transaction be?",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode=None,
             )
