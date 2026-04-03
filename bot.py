@@ -252,6 +252,85 @@ def _build_complete_sheet(sales: dict[str, Any], right: dict[str, float]) -> str
     return msg
 
 
+def _parse_sales_edit(text: str, sales: dict) -> dict | None:
+    """
+    Use Claude Haiku to extract field updates from natural language.
+    Returns {field: value, ...} or None if nothing recognised.
+    Blocking — call via run_in_executor.
+    """
+    import json as _json
+    import anthropic as _anthropic
+
+    all_fields = [
+        "lotto_in", "lotto_online", "sales_tax", "gpi", "product_sales",
+        "lotto_po", "lotto_cr", "food_stamp", "cash_drops", "card",
+        "check", "atm", "pull_tab", "coupon", "loyalty", "vendor",
+    ]
+    current = {k: round(float(sales.get(k) or 0), 2) for k in all_fields}
+
+    prompt = f"""Daily sales report editor for a gas station.
+
+Current values (field: current_value):
+{_json.dumps(current, indent=2)}
+
+Field aliases:
+  lotto_in       = instant lottery sales (IN. LOTTO)
+  lotto_online   = online lottery sales (ON. LINE)
+  sales_tax      = sales tax collected
+  gpi            = GPI / fee buster
+  product_sales  = product / dept total (TOTAL)
+  lotto_po       = lottery payout to customers (LOTTO P.O)
+  lotto_cr       = lottery credit / net lotto (LOTTO CR.)
+  food_stamp     = food stamp / EBT / SNAP
+  cash_drops     = cash drop to safe (CASH DROP)
+  card           = credit/debit card total (C.CARD)
+  check          = check payments
+  atm            = ATM cashback
+  pull_tab       = pull tab payouts
+  coupon         = coupons
+  loyalty        = loyalty / altria
+  vendor         = vendor payout
+
+User says: "{text}"
+
+If the user is changing one or more values, return ONLY a JSON object with the fields to update and their new values.
+If the user is asking a question, greeting, or not changing any value, return {{}}.
+No explanation. Only JSON.
+
+Examples:
+"change instant lotto to 150" → {{"lotto_in": 150}}
+"lotto payout 500 food stamp 200" → {{"lotto_po": 500, "food_stamp": 200}}
+"card was 1300 not 1299" → {{"card": 1300}}
+"lotto credit 0" → {{"lotto_cr": 0}}
+"what's my total?" → {{}}"""
+
+    try:
+        client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=128,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        updates = _json.loads(raw)
+        if not isinstance(updates, dict) or not updates:
+            return None
+        return {k: float(v) for k, v in updates.items() if k in all_fields}
+    except Exception as e:
+        log.warning("Sales edit parse failed: %s", e)
+        return None
+
+
+def _build_preview(sales: dict) -> str:
+    """Build a live preview of the complete daily sheet from the current sales state."""
+    right = {
+        "lotto_po":   sales.get("lotto_po", 0),
+        "lotto_cr":   sales.get("lotto_cr", 0),
+        "food_stamp": sales.get("food_stamp", 0),
+    }
+    return _build_complete_sheet(sales, right)
+
+
 def _parse_right_side(text: str) -> dict[str, float] | None:
     """
     Parse user's right-side input for the 3 manual fields.
@@ -989,27 +1068,17 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     # ── Priority 1: pending daily sheet ─────────────────────────────────────
     sales = await get_state(settings.store_id, _STATE_SALES)
     if sales:
-        # "ok" / "confirm" means the OCR pre-filled everything and user is confirming
         clean_reply = text.strip().lower()
-        if clean_reply in ("ok", "confirm", "yes", "save", "good", "correct"):
-            # Use OCR-prefilled right-side values stored in the sales dict
+
+        # ── Save / confirm ───────────────────────────────────────────────────
+        if clean_reply in ("ok", "confirm", "yes", "save", "good", "correct", "done", "log it", "log"):
             right = {
-                "lotto_po":   sales.get("_ocr_lotto_po", 0),
-                "lotto_cr":   sales.get("_ocr_lotto_cr", 0),
-                "food_stamp": sales.get("_ocr_food_stamp", 0),
+                "lotto_po":   sales.get("lotto_po",   sales.get("_ocr_lotto_po",   0)),
+                "lotto_cr":   sales.get("lotto_cr",   sales.get("_ocr_lotto_cr",   0)),
+                "food_stamp": sales.get("food_stamp", sales.get("_ocr_food_stamp", 0)),
             }
-            sales_for_sheet = dict(sales)
-            sales_for_sheet.update(right)
-            log_daily_sales(sales_for_sheet)
-            await save_daily_sales(settings.store_id, sales, right)
-            save_daily_report(settings.store_id, sales, right)
-            await clear_state(settings.store_id, _STATE_SALES)
-            await update.message.reply_text("✅ Confirmed and logged to Google Sheets.", parse_mode=None)
-            return
-        right = _parse_right_side(text)
-        if right is not None:
-            sheet_msg = _build_complete_sheet(sales, right)
-            await update.message.reply_text(sheet_msg, parse_mode=ParseMode.MARKDOWN)
+            preview = _build_complete_sheet(sales, right)
+            await update.message.reply_text(preview, parse_mode=ParseMode.MARKDOWN)
             await update.message.reply_text("📊 Logging to Google Sheets...", parse_mode=None)
             try:
                 sales_for_sheet = dict(sales)
@@ -1017,18 +1086,46 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
                 log_daily_sales(sales_for_sheet)
                 await save_daily_sales(settings.store_id, sales, right)
                 save_daily_report(settings.store_id, sales, right)
+                await clear_state(settings.store_id, _STATE_SALES)
                 await update.message.reply_text("✅ Logged to Google Sheets.", parse_mode=None)
             except Exception as e:
                 log.error("Sheets logging failed: %s", e, exc_info=True)
                 await update.message.reply_text(f"⚠️ Sheets logging failed: {e}", parse_mode=None)
-            await clear_state(settings.store_id, _STATE_SALES)
             return
-        else:
+
+        # ── Structured right-side format (LOTTO PO: X / LOTTO CR: Y / FOOD STAMP: Z) ──
+        right = _parse_right_side(text)
+        if right is not None:
+            sales.update(right)
+            await save_state(settings.store_id, _STATE_SALES, sales)
+            preview = _build_preview(sales)
+            await update.message.reply_text(preview, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
+            return
+
+        # ── Natural language edit ("change card to 1300", "lotto payout 500") ──
+        edits = await asyncio.get_event_loop().run_in_executor(
+            None, _parse_sales_edit, text, sales
+        )
+        if edits:
+            sales.update(edits)
+            await save_state(settings.store_id, _STATE_SALES, sales)
+            changed = ", ".join(f"{k}=${v:.2f}" for k, v in edits.items())
+            preview = _build_preview(sales)
             await update.message.reply_text(
-                "⚠️ Could not parse. Please reply with:\nLOTTO PO: 16\nLOTTO CR: 0\nFOOD STAMP: 27.97",
-                parse_mode=None,
+                f"Updated: {changed}\n\n" + preview,
+                parse_mode=ParseMode.MARKDOWN,
             )
+            await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
             return
+
+        # ── Nothing matched — show current state as a reminder ───────────────
+        preview = _build_preview(sales)
+        await update.message.reply_text(
+            preview + "\n\nChange any number (e.g. *lotto payout 500*) or reply *ok* to save.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
 
     # ── Priority 2: pending invoice items confirmation ───────────────────────
     pending_items = await get_state(settings.store_id, _STATE_INVOICE_ITEMS)
