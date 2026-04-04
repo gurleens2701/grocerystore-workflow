@@ -1000,8 +1000,11 @@ def mark_cc_settled(sale_date: date, bank_deposit: float, bank_date: date) -> st
     sheet.format(cell, {
         "backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}
     })
-    # Add note with bank info
-    sheet.update_note(cell, f"CC settled ${bank_deposit:,.2f} on {bank_date}")
+    # Add note with bank info (gspread >=5.x)
+    try:
+        sheet.update_note(cell, f"CC settled ${bank_deposit:,.2f} on {bank_date}")
+    except Exception:
+        pass  # note is optional
     return f"Marked CC settled: {sale_date} CREDIT cell → green (bank ${bank_deposit:,.2f} on {bank_date})"
 
 
