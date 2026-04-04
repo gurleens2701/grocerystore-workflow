@@ -264,6 +264,7 @@ async def reconcile_new_transactions(store_id: str) -> dict:
     Process all bank_transactions with review_status='pending' for this store.
     Returns {"needs_review": [txn_dicts], "cc_mismatches": [mismatch_dicts], "auto_classified": int}.
     """
+    import asyncio
     from sqlalchemy import select, and_
     from db.database import get_async_session
     from db.models import BankTransaction
@@ -306,8 +307,12 @@ async def reconcile_new_transactions(store_id: str) -> dict:
                                               ai_guess=rule["reconcile_type"]))
                 continue
 
-            # 2. Google Sheet smart matching
-            sheet_match = await _match_to_sheet(desc, amount)
+            # 2. Google Sheet smart matching (with timeout — sheets API is slow)
+            try:
+                sheet_match = await asyncio.wait_for(_match_to_sheet(desc, amount), timeout=10.0)
+            except asyncio.TimeoutError:
+                log.warning("Sheet match timed out for %s", desc[:40])
+                sheet_match = None
 
             if sheet_match and not sheet_match.get("proposed"):
                 # Confident match (ACH vendor found in sheet) — auto-confirm + highlight
@@ -332,9 +337,13 @@ async def reconcile_new_transactions(store_id: str) -> dict:
                 needs_review.append(d)
                 continue
 
-            # 3. AI for truly unknown transactions
+            # 3. AI for truly unknown transactions (with timeout)
             if rule is None:
-                ai         = await _ai_categorize(desc, amount)
+                try:
+                    ai = await asyncio.wait_for(_ai_categorize(desc, amount), timeout=15.0)
+                except asyncio.TimeoutError:
+                    log.warning("AI categorize timed out for %s", desc[:40])
+                    ai = {"reconcile_type": "skip", "confidence": 0.0}
                 confidence = ai.get("confidence", 0.0)
                 rtype      = ai.get("reconcile_type", "skip")
                 subcat     = ai.get("subcategory")
@@ -364,7 +373,11 @@ async def reconcile_new_transactions(store_id: str) -> dict:
 
         await session.commit()
 
-    cc_mismatches = await check_cc_settlements(store_id)
+    try:
+        cc_mismatches = await asyncio.wait_for(check_cc_settlements(store_id), timeout=30.0)
+    except (asyncio.TimeoutError, Exception) as e:
+        log.warning("CC settlement check failed/timed out: %s", e)
+        cc_mismatches = []
 
     log.info(
         "Reconcile store=%s auto=%d needs_review=%d cc_mismatches=%d",
@@ -667,7 +680,7 @@ async def get_auto_reviews(store_id: str) -> list[dict]:
 
 
 async def get_pending_reviews(store_id: str) -> list[dict]:
-    """Return all transactions currently awaiting user confirmation."""
+    """Return all transactions awaiting user categorization (pending + needs_review)."""
     from sqlalchemy import select
     from db.database import get_async_session
     from db.models import BankTransaction
@@ -676,7 +689,7 @@ async def get_pending_reviews(store_id: str) -> list[dict]:
         rows = (await session.execute(
             select(BankTransaction).where(
                 BankTransaction.store_id == store_id,
-                BankTransaction.review_status == "needs_review",
+                BankTransaction.review_status.in_(["needs_review", "pending"]),
             ).order_by(BankTransaction.transaction_date.desc()).limit(50)
         )).scalars().all()
 
