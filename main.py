@@ -21,7 +21,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from bot import build_app, scheduled_daily
+from bot import build_app, scheduled_daily, notify_bank_sync_results
 from config.settings import settings
 from tools.sync import run_nightly_sync
 
@@ -60,6 +60,31 @@ async def run_bot() -> None:
         trigger=IntervalTrigger(minutes=15),
         id="nightly_sync",
         name="Nightly Sheets → PostgreSQL Sync",
+        replace_existing=True,
+    )
+
+    # Bank sync every 4 hours — pull new transactions and notify via Telegram
+    async def _scheduled_bank_sync():
+        from tools.plaid_tools import is_connected, sync_transactions
+        try:
+            if await is_connected(settings.store_id):
+                result = await sync_transactions(settings.store_id)
+                added = result.get("added", 0)
+                needs = len(result.get("needs_review", []))
+                autos = len(result.get("auto_list", []))
+                if added or needs or autos:
+                    await notify_bank_sync_results(result, app.bot)
+                    log.info("Scheduled bank sync: added=%d needs_review=%d auto=%d", added, needs, autos)
+                else:
+                    log.info("Scheduled bank sync: no new transactions")
+        except Exception as e:
+            log.warning("Scheduled bank sync failed: %s", e)
+
+    scheduler.add_job(
+        _scheduled_bank_sync,
+        trigger=IntervalTrigger(hours=4),
+        id="bank_sync",
+        name="Bank Transaction Sync (every 4h)",
         replace_existing=True,
     )
 

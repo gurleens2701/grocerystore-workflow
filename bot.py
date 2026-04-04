@@ -1090,6 +1090,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             subcategory = text.strip()
             await clear_state(settings.store_id, key)
             result = await confirm_transaction(settings.store_id, txn_id, reconcile_type, subcategory, sender="user")
+            await clear_state(settings.store_id, f"bk_msg_{txn_id}")
             if result:
                 await update.message.reply_text(
                     f"✅ Logged as {reconcile_type}: {subcategory}\n"
@@ -1781,6 +1782,44 @@ async def _send_invoice_paid_alert(bot: Bot, inv: dict) -> None:
     )
 
 
+async def _save_txn_message_id(txn_id: int, message_id: int) -> None:
+    """Save the Telegram message_id for a bank transaction so we can edit it later."""
+    await save_state(settings.store_id, f"bk_msg_{txn_id}", {"message_id": message_id})
+
+
+async def _get_txn_message_id(txn_id: int) -> int | None:
+    """Retrieve the Telegram message_id for a bank transaction."""
+    state = await get_state(settings.store_id, f"bk_msg_{txn_id}")
+    return state.get("message_id") if state else None
+
+
+async def mark_txn_confirmed_on_telegram(txn_id: int, reconcile_type: str, subcategory: str | None) -> None:
+    """
+    Edit the Telegram message for a bank transaction to show it's been confirmed.
+    Called from dashboard API when user confirms there — keeps Telegram in sync.
+    """
+    bot = _bot_instance
+    if not bot:
+        return
+    msg_id = await _get_txn_message_id(txn_id)
+    if not msg_id:
+        return
+    label = reconcile_type
+    if subcategory:
+        label += f" ({subcategory})"
+    try:
+        await bot.edit_message_text(
+            chat_id=settings.telegram_chat_id,
+            message_id=msg_id,
+            text=f"✅ Confirmed via dashboard: {label}",
+            parse_mode=None,
+        )
+    except Exception as e:
+        log.warning("Failed to update Telegram message for txn %s: %s", txn_id, e)
+    finally:
+        await clear_state(settings.store_id, f"bk_msg_{txn_id}")
+
+
 async def send_bank_review_request(bot: Bot, txn: dict) -> None:
     """Send a single transaction review message with inline keyboard to the owner."""
     direction  = "OUT" if txn["amount"] > 0 else "IN"
@@ -1813,12 +1852,13 @@ async def send_bank_review_request(bot: Bot, txn: dict) -> None:
             InlineKeyboardButton("✅ Yes", callback_data=f"bk_yes:{txn['id']}"),
             InlineKeyboardButton("❌ No, something else", callback_data=f"bk_no:{txn['id']}"),
         ]]
-        await bot.send_message(
+        msg = await bot.send_message(
             chat_id=settings.telegram_chat_id,
             text=text,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        await _save_txn_message_id(txn["id"], msg.message_id)
         return
 
     # --- Unknown transaction: standard category keyboard ---
@@ -1838,12 +1878,13 @@ async def send_bank_review_request(bot: Bot, txn: dict) -> None:
         [InlineKeyboardButton(label, callback_data=f"bk:{rtype}:{txn['id']}")]
         for label, rtype in _REVIEW_TYPES
     ]
-    await bot.send_message(
+    msg = await bot.send_message(
         chat_id=settings.telegram_chat_id,
         text=text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+    await _save_txn_message_id(txn["id"], msg.message_id)
 
 
 async def send_bank_auto_review(bot: Bot, txn: dict) -> None:
@@ -1868,12 +1909,13 @@ async def send_bank_auto_review(bot: Bot, txn: dict) -> None:
         InlineKeyboardButton("✅ Correct", callback_data=f"bk_ok:{txn['id']}"),
         InlineKeyboardButton("✏️ Change", callback_data=f"bk_change:{txn['id']}"),
     ]]
-    await bot.send_message(
+    msg = await bot.send_message(
         chat_id=settings.telegram_chat_id,
         text=text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+    await _save_txn_message_id(txn["id"], msg.message_id)
 
 
 async def send_cc_settlement_alert(bot: Bot, settlement: dict) -> None:
@@ -2013,6 +2055,7 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     "vendor":     match_state["vendor"],
                     "entry_date": entry_date,
                 })
+                await clear_state(store_id, f"bk_msg_{txn_id}")
                 await query.edit_message_text(
                     f"✅ Confirmed — {match_state['vendor']} {match_state['match_type']} "
                     f"on {entry_date}. Sheet highlighted green.",
@@ -2043,6 +2086,7 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             # User confirms the auto-classification — mark as confirmed
             from tools.bank_reconciler import confirm_auto_transaction
             await confirm_auto_transaction(store_id, txn_id)
+            await clear_state(store_id, f"bk_msg_{txn_id}")
             await query.edit_message_text("✅ Confirmed. I'll remember this for future transactions.", parse_mode=None)
         else:
             # User wants to change — show full category keyboard
@@ -2091,12 +2135,15 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     from tools.bank_reconciler import confirm_transaction, skip_transaction
     if reconcile_type == "skip":
         await skip_transaction(store_id, txn_id)
+        await clear_state(store_id, f"bk_msg_{txn_id}")
         await query.edit_message_text("✅ Marked as skipped (fee/transfer). Won't ask again for similar transactions.", parse_mode=None)
     elif reconcile_type == "cc_settlement":
         result = await confirm_transaction(store_id, txn_id, "cc_settlement", None, sender="user")
+        await clear_state(store_id, f"bk_msg_{txn_id}")
         await query.edit_message_text("✅ Marked as CC settlement. Learning pattern for future.", parse_mode=None)
     else:
         result = await confirm_transaction(store_id, txn_id, reconcile_type, None, sender="user")
+        await clear_state(store_id, f"bk_msg_{txn_id}")
         await query.edit_message_text(f"✅ Confirmed as {reconcile_type}.", parse_mode=None)
 
 

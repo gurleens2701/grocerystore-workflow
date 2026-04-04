@@ -1305,6 +1305,13 @@ async def bank_confirm_auto(
     from tools.bank_reconciler import confirm_auto_transaction
     sid = resolve_store(body.store_id, user)
     ok = await confirm_auto_transaction(sid, body.txn_id)
+    # Sync Telegram message
+    try:
+        from bot import mark_txn_confirmed_on_telegram
+        asyncio.create_task(mark_txn_confirmed_on_telegram(
+            body.txn_id, body.reconcile_type or "auto", body.subcategory))
+    except Exception:
+        pass
     return {"ok": ok}
 
 
@@ -1330,6 +1337,13 @@ async def bank_confirm(
     result = await confirm_transaction(sid, body.txn_id, body.reconcile_type, body.subcategory, sender="dashboard")
     if not result:
         raise HTTPException(status_code=404, detail="Transaction not found")
+    # Sync Telegram message
+    try:
+        from bot import mark_txn_confirmed_on_telegram
+        asyncio.create_task(mark_txn_confirmed_on_telegram(
+            body.txn_id, body.reconcile_type, body.subcategory))
+    except Exception:
+        pass
     return result
 
 
@@ -1348,5 +1362,11 @@ async def bank_skip(
     ok = await skip_transaction(sid, int(txn_id))
     if not ok:
         raise HTTPException(status_code=404, detail="Transaction not found")
+    # Sync Telegram message
+    try:
+        from bot import mark_txn_confirmed_on_telegram
+        asyncio.create_task(mark_txn_confirmed_on_telegram(int(txn_id), "skip", None))
+    except Exception:
+        pass
     return {"status": "skipped"}
 
