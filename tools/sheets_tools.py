@@ -981,6 +981,30 @@ def mark_expense_paid(category: str, entry_date: date) -> str:
     return f"Marked PAID: {col_name} expense on {entry_date}"
 
 
+def mark_cc_settled(sale_date: date, bank_deposit: float, bank_date: date) -> str:
+    """
+    Highlight the CREDIT column cell green for the matched sale day,
+    indicating the CC settlement cleared in the bank.
+    Adds a note with the bank deposit date and amount.
+    """
+    # CREDIT is in DAILY_HEADERS
+    credit_idx = DAILY_HEADERS.index("CREDIT") + 1  # 1-based column
+    target_row = _DAILY_DATA_START + sale_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, credit_idx)
+
+    client = _get_client()
+    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    sheet = _get_or_create_monthly_tab(spreadsheet, sale_date)
+
+    # Green background
+    sheet.format(cell, {
+        "backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}
+    })
+    # Add note with bank info
+    sheet.update_note(cell, f"CC settled ${bank_deposit:,.2f} on {bank_date}")
+    return f"Marked CC settled: {sale_date} CREDIT cell → green (bank ${bank_deposit:,.2f} on {bank_date})"
+
+
 def mark_rebate_paid(vendor: str, entry_date: date) -> str:
     """Turn the rebate cell for this vendor+date green (bank confirmed receipt)."""
     col_name = resolve_rebate_vendor(vendor)

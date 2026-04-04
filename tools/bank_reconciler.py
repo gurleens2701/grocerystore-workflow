@@ -37,21 +37,47 @@ log = logging.getLogger(__name__)
 
 _INSTANT_RULES: list[tuple[str, str, str | None]] = [
     # (substring, reconcile_type, subcategory)
-    ("square",        "cc_settlement", None),
-    ("stripe",        "cc_settlement", None),
-    ("paymentech",    "cc_settlement", None),
-    ("heartland",     "cc_settlement", None),
-    ("tsys",          "cc_settlement", None),
-    ("firstdata",     "cc_settlement", None),
-    ("elavon",        "cc_settlement", None),
-    ("worldpay",      "cc_settlement", None),
-    ("visa batch",    "cc_settlement", None),
-    ("mc batch",      "cc_settlement", None),
+    # CC settlements
+    ("square",           "cc_settlement", None),
+    ("stripe",           "cc_settlement", None),
+    ("paymentech",       "cc_settlement", None),
+    ("heartland",        "cc_settlement", None),
+    ("tsys",             "cc_settlement", None),
+    ("firstdata",        "cc_settlement", None),
+    ("elavon",           "cc_settlement", None),
+    ("worldpay",         "cc_settlement", None),
+    ("visa batch",       "cc_settlement", None),
+    ("mc batch",         "cc_settlement", None),
     ("mastercard batch", "cc_settlement", None),
-    ("card deposit",  "cc_settlement", None),
-    ("bankcard",      "cc_settlement", None),
-    ("ach credit",    "cc_settlement", None),
+    ("card deposit",     "cc_settlement", None),
+    ("bankcard",         "cc_settlement", None),
+    ("ach credit",       "cc_settlement", None),
+    ("merchant bankcd",  "cc_settlement", None),
+    # Lottery
+    ("lottery inv",      "expense",  "LOTTERY"),
+    ("lottery",          "expense",  "LOTTERY"),
+    ("lotto",            "expense",  "LOTTERY"),
+    # ATM settlement
+    ("cash depot",       "rebate",   "ATM"),
+    ("atm settle",       "rebate",   "ATM"),
+    # Tobacco/vendor rebates
+    ("pm usa",           "rebate",   "PM USA"),
+    ("altria",           "rebate",   "ALTRIA"),
+    ("rai services",     "rebate",   "RAI"),
+    ("reynolds",         "rebate",   "REYNOLDS"),
+    ("liggett",          "rebate",   "LIGGETT"),
+    # NRS
+    ("national retail",  "expense",  "NRS"),
 ]
+
+def _check_instant_rules(description: str) -> tuple[str, str | None] | None:
+    """Check if a transaction description matches any hardcoded instant rule."""
+    desc_lower = description.lower()
+    for substring, rtype, subcat in _INSTANT_RULES:
+        if substring in desc_lower:
+            return (rtype, subcat)
+    return None
+
 
 _CC_KEYWORDS = {
     "square", "stripe", "paymentech", "heartland", "tsys", "firstdata",
@@ -255,10 +281,21 @@ async def reconcile_new_transactions(store_id: str) -> dict:
         auto_count   = 0
 
         for txn in pending:
+          try:
             desc   = txn.description
             amount = float(txn.amount)
 
-            # 1. Instant / learned rules (CC settlement, previously confirmed patterns)
+            # 0. Check instant (hardcoded) rules first
+            instant = _check_instant_rules(desc)
+            if instant:
+                txn.review_status        = "auto"
+                txn.reconcile_type       = instant[0]
+                txn.reconcile_subcategory = instant[1]
+                auto_count += 1
+                auto_list.append(_txn_to_dict(txn, confidence=1.0, ai_guess=instant[0]))
+                continue
+
+            # 1. Learned rules (previously confirmed patterns)
             rule = await _lookup_rule(store_id, desc)
             if rule and rule["confidence"] >= 0.95:
                 txn.review_status        = "auto"
@@ -320,6 +357,10 @@ async def reconcile_new_transactions(store_id: str) -> dict:
                 txn.reconcile_subcategory = rule["reconcile_subcategory"]
                 needs_review.append(_txn_to_dict(txn, confidence=rule["confidence"],
                                                   ai_guess=rule["reconcile_type"]))
+          except Exception as e:
+            log.error("Reconcile failed for txn %s (%s): %s", txn.id, txn.description[:40], e, exc_info=True)
+            txn.review_status = "needs_review"
+            needs_review.append(_txn_to_dict(txn))
 
         await session.commit()
 
@@ -608,6 +649,23 @@ async def _auto_log(
 
 # ── Pending review queue ──────────────────────────────────────────────────────
 
+async def get_auto_reviews(store_id: str) -> list[dict]:
+    """Return auto-classified transactions that haven't been confirmed yet."""
+    from sqlalchemy import select
+    from db.database import get_async_session
+    from db.models import BankTransaction
+
+    async with get_async_session() as session:
+        rows = (await session.execute(
+            select(BankTransaction).where(
+                BankTransaction.store_id == store_id,
+                BankTransaction.review_status == "auto",
+            ).order_by(BankTransaction.transaction_date.desc()).limit(50)
+        )).scalars().all()
+
+    return [_txn_to_dict(r) for r in rows]
+
+
 async def get_pending_reviews(store_id: str) -> list[dict]:
     """Return all transactions currently awaiting user confirmation."""
     from sqlalchemy import select
@@ -630,14 +688,22 @@ async def get_pending_reviews(store_id: str) -> list[dict]:
 async def check_cc_settlements(store_id: str) -> list[dict]:
     """
     Match bank CC deposit transactions to DailySales.card totals.
-    Settlement usually arrives 1-3 business days after the sale day.
-    Returns list of mismatch dicts: {"bank_date", "bank_amount", "sale_date", "sale_card", "diff"}.
+    Settlement usually arrives 1-5 business days after the sale day.
+
+    For each CC deposit:
+      - Find the best matching DailySales.card within a date window
+      - If within $1: auto-match, highlight Google Sheet CREDIT cell green
+      - If >$1 diff: report as mismatch
+
+    Returns list of match/mismatch dicts with keys:
+      bank_txn_id, bank_date, bank_amount, bank_desc, sale_date, sale_card, diff, matched
     """
+    import asyncio
     from sqlalchemy import select, and_
     from db.database import get_async_session
     from db.models import BankTransaction, DailySales
 
-    mismatches = []
+    results = []
 
     async with get_async_session() as session:
         # Get CC settlement deposits from past 14 days (amount < 0 = money IN to account)
@@ -651,12 +717,25 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
             ))
         )).scalars().all()
 
+        # Track which sale days are already matched (avoid double-matching)
+        matched_sale_days = set()
+        # Check which days were already highlighted (cc_matched flag in DB)
+        already_matched_txn_ids = set()
+        for dep in cc_deposits:
+            if getattr(dep, 'cc_matched_sale_date', None):
+                already_matched_txn_ids.add(dep.id)
+                matched_sale_days.add(dep.cc_matched_sale_date)
+
         for dep in cc_deposits:
             bank_amount = abs(float(dep.amount))
             dep_date = dep.transaction_date
 
-            # Look for daily_sales within -1 to +4 days (settlement timing)
-            date_lo = dep_date - timedelta(days=4)
+            # Skip if already matched in a previous run
+            if dep.id in already_matched_txn_ids:
+                continue
+
+            # Look for daily_sales within -1 to +5 days (settlement timing varies)
+            date_lo = dep_date - timedelta(days=5)
             date_hi = dep_date + timedelta(days=1)
 
             daily_rows = (await session.execute(
@@ -670,20 +749,40 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
             if not daily_rows:
                 continue
 
+            # Filter out already-matched sale days
+            available = [r for r in daily_rows if str(r.sale_date) not in matched_sale_days]
+            if not available:
+                continue
+
             # Find the best matching day (closest amount)
-            best = min(daily_rows, key=lambda r: abs(float(r.card) - bank_amount))
+            best = min(available, key=lambda r: abs(float(r.card) - bank_amount))
             sale_card = float(best.card)
             diff = round(bank_amount - sale_card, 2)
 
-            if abs(diff) > 1.00:  # > $1 mismatch
-                mismatches.append({
-                    "bank_txn_id":  dep.id,
-                    "bank_date":    str(dep_date),
-                    "bank_amount":  bank_amount,
-                    "bank_desc":    dep.description,
-                    "sale_date":    str(best.sale_date),
-                    "sale_card":    sale_card,
-                    "diff":         diff,
-                })
+            entry = {
+                "bank_txn_id":  dep.id,
+                "bank_date":    str(dep_date),
+                "bank_amount":  bank_amount,
+                "bank_desc":    dep.description,
+                "sale_date":    str(best.sale_date),
+                "sale_card":    sale_card,
+                "diff":         diff,
+                "matched":      abs(diff) <= 50.00,  # within $50 = matched
+            }
 
-    return mismatches
+            if abs(diff) <= 50.00:
+                # Good match — highlight in Google Sheet
+                matched_sale_days.add(str(best.sale_date))
+                try:
+                    from tools.sheets_tools import mark_cc_settled
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, mark_cc_settled, best.sale_date, bank_amount, dep_date,
+                    )
+                    log.info("CC settled: bank $%.2f on %s → sale %s card $%.2f (diff $%.2f)",
+                             bank_amount, dep_date, best.sale_date, sale_card, diff)
+                except Exception as e:
+                    log.warning("CC sheet highlight failed: %s", e)
+
+            results.append(entry)
+
+    return results

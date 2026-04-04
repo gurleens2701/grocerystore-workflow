@@ -251,6 +251,7 @@ async def sync_transactions(store_id: str) -> dict:
         "needs_review":   reconcile_result.get("needs_review", []),
         "cc_mismatches":  reconcile_result.get("cc_mismatches", []),
         "auto_classified": reconcile_result.get("auto_classified", 0),
+        "auto_list":      reconcile_result.get("auto_list", []),
     }
 
 

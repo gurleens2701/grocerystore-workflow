@@ -65,7 +65,7 @@ _STATE_AWAITING_REPORT = "awaiting_daily_report"  # manual mode: waiting for the
 _STATE_REPORT_DRAFT = "daily_report_draft"        # manual mode: OCR done, some fields still missing
 _STATE_CHAT_HISTORY = "chat_history"              # rolling conversation history (last 20 messages)
 
-_HISTORY_MAX = 20  # max messages to keep (10 back-and-forth exchanges)
+_HISTORY_MAX = 40  # max messages to keep (20 back-and-forth exchanges)
 
 
 async def _load_history(store_id: str) -> list[dict]:
@@ -570,9 +570,9 @@ async def scheduled_daily(app: Application) -> None:
 
             for mm in cc_mismatches:
                 try:
-                    await send_cc_mismatch_alert(bot, mm)
+                    await send_cc_settlement_alert(bot, mm)
                 except Exception as e:
-                    log.warning("CC mismatch alert failed: %s", e)
+                    log.warning("CC settlement alert failed: %s", e)
 
             # ── Negative balance alert ────────────────────────────────────
             try:
@@ -1124,6 +1124,15 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     if sales:
         clean_reply = text.strip().lower()
 
+        # ── Cancel — escape from daily report state to normal chat ─────────────
+        if clean_reply in ("cancel", "nevermind", "never mind", "stop", "exit", "quit", "abort"):
+            await clear_state(settings.store_id, _STATE_SALES)
+            await update.message.reply_text(
+                "Daily report cancelled. What do you need?",
+                parse_mode=None,
+            )
+            return
+
         # ── Save / confirm ───────────────────────────────────────────────────
         if clean_reply in ("ok", "confirm", "yes", "save", "good", "correct", "done", "log it", "log"):
             right = {
@@ -1173,10 +1182,23 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
             return
 
-        # ── Nothing matched — show current state as a reminder ───────────────
+        # ── Nothing matched — answer the question, then remind about pending report ──
+        # Pass to the agent so genuine questions / commands work even mid-report.
+        from tools.main_agent import run_agent
+        history = await _load_history(settings.store_id)
+        try:
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, run_agent, text, settings.store_id, owner_name, history
+            )
+            await update.message.reply_text(reply, parse_mode=None)
+            await _save_history(settings.store_id, history, text, reply)
+        except Exception as e:
+            log.error("Agent failed inside sales state: %s", e, exc_info=True)
+        # Remind them the daily report is still waiting
         preview = _build_preview(sales)
         await update.message.reply_text(
-            preview + "\n\nChange any number (e.g. *lotto payout 500*) or reply *ok* to save.",
+            "⬆️ Answered above. Your daily report is still waiting:\n\n" + preview +
+            "\n\nReply *ok* to save, or *cancel* to dismiss it.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -1321,7 +1343,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         return
 
     # ── Priority 4: daily fetch starts the state machine; everything else → unified agent ──
-    intent = await asyncio.get_event_loop().run_in_executor(None, classify_message, text)
+    intent = classify_message(text)
     log.info("Intent: %s | %s", intent, text[:60])
 
     if intent == "daily_fetch":
@@ -1363,7 +1385,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(reply, parse_mode=None)
             asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", reply))
             # Save exchange to history (use original text, not injected context)
-            asyncio.create_task(_save_history(settings.store_id, history, text, reply))
+            await _save_history(settings.store_id, history, text, reply)
         except Exception as e:
             log.error("Agent failed: %s", e, exc_info=True)
             await update.message.reply_text(f"⚠️ Something went wrong: {e}", parse_mode=None)
@@ -1496,7 +1518,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
 
         # Otherwise run through unified agent
-        intent = await asyncio.get_event_loop().run_in_executor(None, classify_message, text)
+        intent = classify_message(text)
         if intent == "daily_fetch":
             await _do_daily_fetch(context.bot, settings.telegram_chat_id)
         else:
@@ -1873,18 +1895,31 @@ async def send_bank_auto_review(bot: Bot, txn: dict) -> None:
     )
 
 
-async def send_cc_mismatch_alert(bot: Bot, mismatch: dict) -> None:
-    """Notify owner of a CC settlement vs daily card total mismatch."""
-    diff = mismatch["diff"]
-    diff_str = f"+${diff:,.2f} (bank over)" if diff > 0 else f"-${abs(diff):,.2f} (short)"
-    text = (
-        f"⚠️ *CC Settlement Mismatch*\n"
-        f"{'─'*32}\n"
-        f"  Bank deposit: ${mismatch['bank_amount']:,.2f} on {mismatch['bank_date']}\n"
-        f"  Daily card: ${mismatch['sale_card']:,.2f} for {mismatch['sale_date']}\n"
-        f"  Difference: {diff_str}\n\n"
-        f"Check your dashboard: http://178.104.61.18/bank"
-    )
+async def send_cc_settlement_alert(bot: Bot, settlement: dict) -> None:
+    """Notify owner of a CC settlement match or mismatch."""
+    diff = settlement["diff"]
+    matched = settlement.get("matched", False)
+
+    if matched:
+        text = (
+            f"✅ *CC Settlement Matched*\n"
+            f"{'─'*32}\n"
+            f"  Bank deposit: *${settlement['bank_amount']:,.2f}* on {settlement['bank_date']}\n"
+            f"  Matched to: {settlement['sale_date']} card total *${settlement['sale_card']:,.2f}*\n"
+        )
+        if abs(diff) > 0.01:
+            text += f"  Diff: ${abs(diff):,.2f}\n"
+        text += f"  Sheet CREDIT cell highlighted green."
+    else:
+        diff_str = f"+${diff:,.2f} (bank over)" if diff > 0 else f"-${abs(diff):,.2f} (short)"
+        text = (
+            f"⚠️ *CC Settlement Mismatch*\n"
+            f"{'─'*32}\n"
+            f"  Bank deposit: ${settlement['bank_amount']:,.2f} on {settlement['bank_date']}\n"
+            f"  Closest match: {settlement['sale_date']} card ${settlement['sale_card']:,.2f}\n"
+            f"  Difference: {diff_str}\n\n"
+            f"Check your dashboard: clerkai.live/bank"
+        )
     await bot.send_message(
         chat_id=settings.telegram_chat_id,
         text=text,
@@ -2121,12 +2156,12 @@ async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             log.warning("Failed to send review for txn %s: %s", txn.get("id"), e)
 
-    # Send CC mismatch alerts
+    # Send CC settlement alerts
     for mm in cc_mismatches:
         try:
-            await send_cc_mismatch_alert(context.bot, mm)
+            await send_cc_settlement_alert(context.bot, mm)
         except Exception as e:
-            log.warning("Failed to send CC mismatch alert: %s", e)
+            log.warning("Failed to send CC settlement alert: %s", e)
 
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

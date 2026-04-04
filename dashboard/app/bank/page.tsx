@@ -31,7 +31,7 @@ interface Transaction {
   ai_guess: string
 }
 
-interface CCMismatch {
+interface CCMatch {
   bank_txn_id: number
   bank_date: string
   bank_amount: number
@@ -39,6 +39,7 @@ interface CCMismatch {
   sale_date: string
   sale_card: number
   diff: number
+  matched: boolean
 }
 
 const DATA_ITEMS = [
@@ -213,6 +214,116 @@ function ReviewCard({ txn, onConfirm, onSkip }: {
   )
 }
 
+// ── Auto review card ──────────────────────────────────────────────────────────
+
+function AutoReviewCard({ txn, onConfirm, onChange }: {
+  txn: Transaction
+  onConfirm: (txnId: number) => Promise<void>
+  onChange: (txnId: number) => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const isOut = txn.amount > 0
+
+  async function handleConfirm() {
+    setConfirming(true)
+    await onConfirm(txn.id)
+    setConfirming(false)
+  }
+
+  return (
+    <div className="bg-white border border-blue-100 rounded-xl p-4 space-y-3 shadow-sm">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-gray-900 font-medium truncate">{txn.description}</div>
+          <div className="text-gray-500 text-xs mt-0.5">{txn.date} · {isOut ? 'OUT' : 'IN'}</div>
+          <div className="text-blue-600 text-xs mt-0.5 font-medium">
+            Auto: {txn.reconcile_type}{txn.reconcile_subcategory ? ` (${txn.reconcile_subcategory})` : ''} · {Math.round((txn.confidence ?? 0) * 100)}% confident
+          </div>
+        </div>
+        <div className={`font-bold text-lg shrink-0 ${isOut ? 'text-red-600' : 'text-green-600'}`}>
+          {isOut ? '-' : '+'}${Math.abs(txn.amount).toFixed(2)}
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button
+          onClick={handleConfirm}
+          disabled={confirming}
+          className="flex-1 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
+        >
+          {confirming ? 'Saving...' : '✓ Correct'}
+        </button>
+        <button
+          onClick={() => onChange(txn.id)}
+          className="flex-1 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm font-medium transition-colors"
+        >
+          ✏️ Change
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Change category overlay ───────────────────────────────────────────────────
+
+function ChangeCard({ txn, onConfirm, onCancel }: {
+  txn: Transaction
+  onConfirm: (txnId: number, type: string, sub: string | null) => Promise<void>
+  onCancel: () => void
+}) {
+  const [selected, setSelected] = useState('')
+  const [subcat, setSubcat]     = useState('')
+  const [saving, setSaving]     = useState(false)
+  const selectedType = RECONCILE_TYPES.find(t => t.value === selected)
+
+  async function handleConfirm() {
+    if (!selected) return
+    setSaving(true)
+    await onConfirm(txn.id, selected, selectedType?.needsSub ? subcat || null : null)
+    setSaving(false)
+  }
+
+  return (
+    <div className="bg-white border border-gray-300 rounded-xl p-4 space-y-3 shadow-sm">
+      <div className="text-gray-700 text-sm font-medium">What is this transaction?</div>
+      <div className="text-gray-500 text-xs">{txn.description} · ${Math.abs(txn.amount).toFixed(2)}</div>
+      <div className="flex flex-wrap gap-2">
+        {RECONCILE_TYPES.map(t => (
+          <button
+            key={t.value}
+            onClick={() => { setSelected(t.value); setSubcat('') }}
+            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+              selected === t.value ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {selectedType?.needsSub && (
+        <input
+          type="text"
+          placeholder={selectedType.subLabel}
+          value={subcat}
+          onChange={e => setSubcat(e.target.value)}
+          className="w-full border border-gray-300 text-gray-900 text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      )}
+      <div className="flex gap-2">
+        <button
+          onClick={handleConfirm}
+          disabled={!selected || saving || (selectedType?.needsSub && !subcat)}
+          className="flex-1 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
+        >
+          {saving ? 'Saving...' : '✓ Confirm'}
+        </button>
+        <button onClick={onCancel} className="px-4 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-sm transition-colors">
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function BankPage() {
@@ -220,7 +331,9 @@ export default function BankPage() {
   const [accounts, setAccounts]         = useState<Account[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [pendingReviews, setPendingReviews] = useState<Transaction[]>([])
-  const [ccMismatches, setCCMismatches] = useState<CCMismatch[]>([])
+  const [autoReviews, setAutoReviews]   = useState<Transaction[]>([])
+  const [changingId, setChangingId]     = useState<number | null>(null)
+  const [ccMismatches, setCCMatches] = useState<CCMatch[]>([])
   const [loading, setLoading]           = useState(true)
   const [syncing, setSyncing]           = useState(false)
   const [exchanging, setExchanging]     = useState(false)
@@ -251,8 +364,10 @@ export default function BankPage() {
   const loadReviews = useCallback(async () => {
     const data: any = await api.bank.pendingReviews()
     if (Array.isArray(data)) setPendingReviews(data)
+    const auto: any = await api.bank.autoReviews()
+    if (Array.isArray(auto)) setAutoReviews(auto)
     const mm: any = await api.bank.ccMismatches()
-    if (Array.isArray(mm)) setCCMismatches(mm)
+    if (Array.isArray(mm)) setCCMatches(mm)
   }, [])
 
   useEffect(() => { loadStatus() }, [loadStatus])
@@ -292,7 +407,7 @@ export default function BankPage() {
     try {
       await api.bank.disconnect()
       setConnected(false); setAccounts([]); setTransactions([])
-      setPendingReviews([]); setCCMismatches([]); setPaidInvoices([])
+      setPendingReviews([]); setAutoReviews([]); setCCMatches([]); setPaidInvoices([])
       setSyncResult(null); setShowDisconnect(false)
     } finally { setDisconnecting(false) }
   }
@@ -308,6 +423,24 @@ export default function BankPage() {
   const handleSkip = async (txnId: number) => {
     await api.bank.skip(txnId)
     setPendingReviews(prev => prev.filter(t => t.id !== txnId))
+  }
+
+  const handleConfirmAuto = async (txnId: number) => {
+    const res: any = await api.bank.confirmAuto(txnId)
+    if (res?.ok) {
+      setAutoReviews(prev => prev.filter(t => t.id !== txnId))
+      setChangingId(null)
+      await loadTransactions()
+    }
+  }
+
+  const handleChangeAuto = async (txnId: number, type: string, sub: string | null) => {
+    const res: any = await api.bank.confirm(txnId, type, sub)
+    if (res?.review_status === 'confirmed') {
+      setAutoReviews(prev => prev.filter(t => t.id !== txnId))
+      setChangingId(null)
+      await loadTransactions()
+    }
   }
 
   if (loading) return <div className="p-6 text-gray-500">Loading bank status...</div>
@@ -501,20 +634,32 @@ export default function BankPage() {
         {syncing ? 'Syncing...' : '🔄 Sync Transactions'}
       </button>
 
-      {/* CC Mismatches */}
+      {/* CC Settlements */}
       {ccMismatches.length > 0 && (
         <div className="space-y-2">
-          <h2 className="text-yellow-700 font-semibold text-sm">⚠️ CC Settlement Mismatches ({ccMismatches.length})</h2>
+          <h2 className="text-gray-700 font-semibold text-sm">CC Settlements ({ccMismatches.length})</h2>
           {ccMismatches.map(mm => (
-            <div key={mm.bank_txn_id} className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 shadow-sm">
+            <div key={mm.bank_txn_id} className={`rounded-xl p-4 shadow-sm ${
+              mm.matched
+                ? 'bg-green-50 border border-green-200'
+                : 'bg-yellow-50 border border-yellow-200'
+            }`}>
               <div className="flex justify-between items-start">
                 <div>
                   <div className="text-gray-900 text-sm font-medium">{mm.bank_desc}</div>
                   <div className="text-gray-500 text-xs mt-1">Bank deposit: ${mm.bank_amount.toFixed(2)} on {mm.bank_date}</div>
                   <div className="text-gray-500 text-xs">Daily card total: ${mm.sale_card.toFixed(2)} for {mm.sale_date}</div>
+                  {mm.matched && (
+                    <div className="text-green-600 text-xs mt-1 font-medium">Matched & highlighted in Google Sheet</div>
+                  )}
                 </div>
-                <div className={`text-sm font-bold ${mm.diff > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {mm.diff > 0 ? '+' : ''}${mm.diff.toFixed(2)}
+                <div className="text-right">
+                  {mm.matched
+                    ? <span className="text-green-600 text-sm font-bold">✓ Matched</span>
+                    : <span className={`text-sm font-bold ${mm.diff > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {mm.diff > 0 ? '+' : ''}${mm.diff.toFixed(2)}
+                      </span>
+                  }
                 </div>
               </div>
             </div>
@@ -533,6 +678,22 @@ export default function BankPage() {
           {pendingReviews.map(txn => (
             <ReviewCard key={txn.id} txn={txn} onConfirm={handleConfirm} onSkip={handleSkip} />
           ))}
+        </div>
+      )}
+
+      {/* Auto-classified reviews */}
+      {autoReviews.length > 0 && (
+        <div className="space-y-3">
+          <h2 className="text-gray-900 font-semibold text-sm flex items-center gap-2">
+            Auto-Classified
+            <span className="bg-blue-500 text-white text-xs px-2 py-0.5 rounded-full">{autoReviews.length}</span>
+          </h2>
+          <p className="text-gray-500 text-xs">These were auto-categorized. Confirm if correct or change the category.</p>
+          {autoReviews.map(txn =>
+            changingId === txn.id
+              ? <ChangeCard key={txn.id} txn={txn} onConfirm={handleChangeAuto} onCancel={() => setChangingId(null)} />
+              : <AutoReviewCard key={txn.id} txn={txn} onConfirm={handleConfirmAuto} onChange={setChangingId} />
+          )}
         </div>
       )}
 

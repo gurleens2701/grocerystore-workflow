@@ -1260,6 +1260,13 @@ async def bank_disconnect(
     return {"status": "disconnected"}
 
 
+class BankConfirmBody(BaseModel):
+    txn_id: int
+    reconcile_type: str
+    subcategory: Optional[str] = None
+    store_id: Optional[str] = None
+
+
 @app.get("/api/bank/pending-reviews")
 async def bank_pending_reviews(
     store_id: Optional[str] = Query(None),
@@ -1271,6 +1278,29 @@ async def bank_pending_reviews(
     return await get_pending_reviews(sid)
 
 
+@app.get("/api/bank/auto-reviews")
+async def bank_auto_reviews(
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    """Return auto-classified transactions awaiting user confirmation."""
+    from tools.bank_reconciler import get_auto_reviews
+    sid = resolve_store(store_id, user)
+    return await get_auto_reviews(sid)
+
+
+@app.post("/api/bank/confirm-auto")
+async def bank_confirm_auto(
+    body: BankConfirmBody,
+    user: dict = Depends(get_current_user),
+):
+    """Confirm an auto-classified transaction as-is."""
+    from tools.bank_reconciler import confirm_auto_transaction
+    sid = resolve_store(body.store_id, user)
+    ok = await confirm_auto_transaction(sid, body.txn_id)
+    return {"ok": ok}
+
+
 @app.get("/api/bank/cc-mismatches")
 async def bank_cc_mismatches(
     store_id: Optional[str] = Query(None),
@@ -1280,13 +1310,6 @@ async def bank_cc_mismatches(
     from tools.bank_reconciler import check_cc_settlements
     sid = resolve_store(store_id, user)
     return await check_cc_settlements(sid)
-
-
-class BankConfirmBody(BaseModel):
-    txn_id: int
-    reconcile_type: str
-    subcategory: Optional[str] = None
-    store_id: Optional[str] = None
 
 
 @app.post("/api/bank/confirm")

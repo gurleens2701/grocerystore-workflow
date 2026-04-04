@@ -291,6 +291,17 @@ export const api = {
         body: JSON.stringify({ txn_id: txnId, store_id: sid || undefined }),
       })
     },
+    autoReviews: (storeId?: string) => {
+      const sid = storeId || getActiveStore()
+      return request(`/bank/auto-reviews${sid ? `?store_id=${sid}` : ''}`)
+    },
+    confirmAuto: (txnId: number, storeId?: string) => {
+      const sid = storeId || getActiveStore()
+      return request('/bank/confirm-auto', {
+        method: 'POST',
+        body: JSON.stringify({ txn_id: txnId, store_id: sid || undefined }),
+      })
+    },
   },
 
   chatInvoice: (file: File, senderName: string, storeId?: string) => {

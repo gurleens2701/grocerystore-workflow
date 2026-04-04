@@ -67,6 +67,12 @@ def _parse_date(date_str: str) -> date:
 
     s = date_str.strip().lower()
 
+    # Handle concatenated month+day like "april2", "march15", "jan3"
+    import re as _re
+    _concat = _re.match(r'^([a-z]+)(\d{1,2})$', s)
+    if _concat and _concat.group(1) in _MONTH_NAMES:
+        s = f"{_concat.group(1)} {_concat.group(2)}"
+
     # ISO format YYYY-MM-DD
     if len(s) == 10 and s[4] == "-" and s[7] == "-":
         try:
@@ -126,7 +132,7 @@ def _parse_date(date_str: str) -> date:
 
 @tool
 def query_sales(days: int = 30) -> str:
-    """Query daily sales records. days: how many days back to look (default 30)."""
+    """Query daily sales records. Returns date, product_sales, grand_total, cash_drop, card, lotto_po, lotto_cr, food_stamp, and departments for each day. days: how many days back to look (default 30). Use this when the user asks about past sales, revenue, card totals, or daily numbers."""
     since = date.today() - timedelta(days=days)
     with get_sync_session() as session:
         rows = session.execute(
@@ -147,7 +153,7 @@ def query_sales(days: int = 30) -> str:
 
 @tool
 def query_expenses(days: int = 30, category: str = "") -> str:
-    """Query expense records. days: how many days back. category: optional keyword filter."""
+    """Query expense records. Returns date, category (uppercase like ELECTRICITY, RENT, PAYROLL - SIMMT), and amount. days: how many days back (default 30). category: optional keyword filter (e.g. 'rent' matches RENT)."""
     since = date.today() - timedelta(days=days)
     with get_sync_session() as session:
         stmt = select(Expense).where(
@@ -162,7 +168,7 @@ def query_expenses(days: int = 30, category: str = "") -> str:
 
 @tool
 def query_invoices(days: int = 365, vendor: str = "") -> str:
-    """Query vendor invoice records. days: how many days back (default 365). vendor: optional vendor name filter."""
+    """Query vendor invoice records. Returns date, vendor (canonical name), and amount. days: how many days back (default 365). vendor: optional vendor name filter (partial match, e.g. 'mcl' matches McLane)."""
     since = date.today() - timedelta(days=days)
     with get_sync_session() as session:
         stmt = select(Invoice).where(
@@ -271,9 +277,9 @@ def log_expense(category: str, amount: float, date_str: str = "") -> str:
     """
     Log or update an expense to the database and Google Sheets.
     If an expense for the same category already exists on that date, it will be updated.
-    category: type of expense (electricity, rent, garbage, maintenance, etc.)
+    category: type of expense (electricity, rent, garbage, maintenance, insurance, etc.) — auto-uppercased.
     amount: dollar amount
-    date_str: optional date — M/D, M/D/YYYY, YYYY-MM-DD, or month name like 'march'. Defaults to today.
+    date_str: optional date — "april 2", "april2", "4/2", "4/2/2026", "2026-04-02", or "april". Defaults to today.
     """
     entry_date = _parse_date(date_str)
     cat = category.upper()
@@ -312,9 +318,9 @@ def log_invoice(vendor: str, amount: float, date_str: str = "") -> str:
     """
     Log or update a vendor invoice (COGS/inventory purchase) to the database and Google Sheets.
     If an invoice from the same vendor already exists on that date, it will be updated.
-    vendor: vendor name (Pepsi, McLane, Heidelburg, Roma Wholesale, Coca Cola, Red Bull, Glazer, Ohio Eagle, etc.)
+    vendor: vendor name — fuzzy-matched against known aliases. Known vendors: Pepsi, McLane, Heidelburg, Roma Wholesale, Coca Cola, Red Bull, Glazer, Ohio Eagle, Coremark, Fritolay, Hershey, HD Distribution, Ace Unlimited, Sam's Club, 7UP, Ohio Vanguard, Boneright, Rhinese, Southern G, Pulstar. Misspellings like "bonbright" → "BONERIGHT" are handled automatically.
     amount: dollar amount of invoice
-    date_str: optional date — M/D, M/D/YYYY, YYYY-MM-DD, or month name like 'march'. Defaults to today.
+    date_str: optional date — supports many formats: "april 2", "april2", "4/2", "4/2/2026", "2026-04-02", or just "april" (1st of month). Defaults to today if empty.
     """
     entry_date = _parse_date(date_str)
 
@@ -637,6 +643,16 @@ DATA & LOGGING RULES:
 - The Google Sheet is connected and syncs both ways every night.
 - If asked to sync now, use sync_sheets_now tool.
 
+PARSING USER INPUTS:
+- When a user says "vendor amount date" (e.g. "bonbright 240.98 april2", "mclane 2100 3/14"), call log_invoice with those values. Extract vendor, amount, and date.
+- When a user says "log vendor amount" or "vendor invoice amount", call log_invoice.
+- Vendor names may be misspelled or from voice transcription. The tool will fuzzy-match. Just pass what the user said.
+- Dates can be casual: "yesterday", "march 5", "3/5", "april2", "last tuesday". Pass the date string to the tool.
+- If the user gives vendor + amount but no date, leave date_str empty (defaults to today).
+- When a user asks "what were my sales yesterday" or "what was my sale yesterday", use query_sales. This is NOT a daily report trigger.
+- When a user says "electricity 340 march" or "rent 1200", call log_expense.
+- When a user says "altria rebate 500", call log_rebate.
+
 BUSINESS ADVISOR ROLE:
 - When you show the owner data, also give a short insight if something stands out. For example: "Your cigarette sales dropped 12% this week — that sometimes happens when a competitor runs a promotion nearby."
 - When asked general business questions (pricing, margins, competitors, staffing, inventory, marketing), answer using your general knowledge. You do not need tools for this.
@@ -679,7 +695,7 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
     ]
 
     # Inject prior conversation so the AI remembers context
-    for msg in (history or [])[-20:]:
+    for msg in (history or [])[-30:]:
         if msg["role"] == "user":
             messages.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant":
