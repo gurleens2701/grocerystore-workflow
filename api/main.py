@@ -4,8 +4,11 @@ Runs on port 8000. Nginx proxies /api/* here.
 """
 
 import asyncio
+import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -1228,6 +1231,12 @@ async def bank_sync(
     sid = resolve_store(store_id, user)
     try:
         result = await sync_transactions(sid)
+        # Send Telegram notifications for new transactions (fire-and-forget)
+        try:
+            from bot import notify_bank_sync_results
+            asyncio.create_task(notify_bank_sync_results(result))
+        except Exception as e:
+            log.warning("Telegram bank notification failed: %s", e)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

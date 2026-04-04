@@ -30,6 +30,14 @@ from telegram.ext import (
     filters,
 )
 
+# Module-level bot reference — set by build_app(), used by notify_bank_sync_results()
+_bot_instance: Bot | None = None
+
+
+def get_bot() -> Bot | None:
+    """Return the bot instance (available after build_app)."""
+    return _bot_instance
+
 from config.settings import settings
 from db.ops import log_message, save_daily_sales, save_expense, save_invoice, save_invoice_items, save_rebate, save_revenue, save_vendor_price
 from db.state import clear_state, get_state, save_state
@@ -545,34 +553,7 @@ async def scheduled_daily(app: Application) -> None:
     try:
         if await is_connected(settings.store_id):
             result = await sync_transactions(settings.store_id)
-            needs_review  = result.get("needs_review", [])
-            auto_list     = result.get("auto_list", [])
-            cc_mismatches = result.get("cc_mismatches", [])
-            paid_invoices = result.get("paid_invoices", [])
-
-            for inv in paid_invoices:
-                try:
-                    await _send_invoice_paid_alert(bot, inv)
-                except Exception as e:
-                    log.warning("Invoice paid alert failed: %s", e)
-
-            for txn in needs_review[:5]:
-                try:
-                    await send_bank_review_request(bot, txn)
-                except Exception as e:
-                    log.warning("Review request failed for txn %s: %s", txn.get("id"), e)
-
-            for txn in auto_list[:8]:
-                try:
-                    await send_bank_auto_review(bot, txn)
-                except Exception as e:
-                    log.warning("Auto review send failed for txn %s: %s", txn.get("id"), e)
-
-            for mm in cc_mismatches:
-                try:
-                    await send_cc_settlement_alert(bot, mm)
-                except Exception as e:
-                    log.warning("CC settlement alert failed: %s", e)
+            await notify_bank_sync_results(result, bot)
 
             # ── Negative balance alert ────────────────────────────────────
             try:
@@ -1927,6 +1908,47 @@ async def send_cc_settlement_alert(bot: Bot, settlement: dict) -> None:
     )
 
 
+async def notify_bank_sync_results(result: dict, bot: Bot | None = None) -> None:
+    """
+    Send Telegram notifications for bank sync results.
+    Called from anywhere — daily scheduler, /bank command, or API sync endpoint.
+    """
+    if bot is None:
+        bot = _bot_instance
+    if bot is None:
+        log.warning("notify_bank_sync_results: no bot instance available")
+        return
+
+    needs_review  = result.get("needs_review", [])
+    auto_list     = result.get("auto_list", [])
+    cc_mismatches = result.get("cc_mismatches", [])
+    paid_invoices = result.get("paid_invoices", [])
+
+    for inv in paid_invoices:
+        try:
+            await _send_invoice_paid_alert(bot, inv)
+        except Exception as e:
+            log.warning("Invoice paid alert failed: %s", e)
+
+    for txn in needs_review[:10]:
+        try:
+            await send_bank_review_request(bot, txn)
+        except Exception as e:
+            log.warning("Review request failed for txn %s: %s", txn.get("id"), e)
+
+    for txn in auto_list[:10]:
+        try:
+            await send_bank_auto_review(bot, txn)
+        except Exception as e:
+            log.warning("Auto review send failed for txn %s: %s", txn.get("id"), e)
+
+    for mm in cc_mismatches:
+        try:
+            await send_cc_settlement_alert(bot, mm)
+        except Exception as e:
+            log.warning("CC settlement alert failed: %s", e)
+
+
 async def _send_stale_review_reminder(bot: Bot) -> None:
     """
     If there are bank transactions stuck in needs_review for > 2 days, remind the owner.
@@ -2142,26 +2164,8 @@ async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-    # Send paid invoice alerts
-    for inv in paid_invoices:
-        try:
-            await _send_invoice_paid_alert(context.bot, inv)
-        except Exception as e:
-            log.warning("Invoice paid alert failed: %s", e)
-
-    # Send individual review cards for unknown transactions
-    for txn in needs_review[:5]:  # cap at 5 per sync to avoid spam
-        try:
-            await send_bank_review_request(context.bot, txn)
-        except Exception as e:
-            log.warning("Failed to send review for txn %s: %s", txn.get("id"), e)
-
-    # Send CC settlement alerts
-    for mm in cc_mismatches:
-        try:
-            await send_cc_settlement_alert(context.bot, mm)
-        except Exception as e:
-            log.warning("Failed to send CC settlement alert: %s", e)
+    # Send review cards, auto-classified alerts, CC settlements via shared helper
+    await notify_bank_sync_results(result, context.bot)
 
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2216,7 +2220,9 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_app() -> Application:
+    global _bot_instance
     app = Application.builder().token(settings.telegram_bot_token).build()
+    _bot_instance = app.bot
 
     # Onboarding conversation — runs on /start or first message
     onboarding_conv = ConversationHandler(

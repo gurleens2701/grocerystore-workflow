@@ -581,23 +581,31 @@ async def _auto_log(
     reconcile_type: str,
     subcategory: str | None,
 ) -> None:
-    """Auto-log confirmed transactions to expenses/invoices/rebates."""
+    """
+    Auto-log confirmed transactions to DB tables AND Google Sheet.
+    - expense  → DB Expense + sheet log_expense + highlight green
+    - invoice  → DB Invoice + sheet mark_invoice_paid (highlight green)
+    - rebate   → DB Rebate  + sheet log_rebate + highlight green
+    - payroll  → sheet log_payroll
+    """
+    import asyncio
     from decimal import Decimal
     from db.database import get_async_session
     from db.models import Expense, Invoice, Rebate
 
     dec_amount = Decimal(str(abs(amount)))
+    float_amount = float(dec_amount)
+    label = subcategory or description[:64]
+    loop = asyncio.get_event_loop()
 
     if reconcile_type == "expense":
-        from db.ops import log_message
         async with get_async_session() as session:
-            # Check if already exists
             from sqlalchemy import select, and_
             existing = (await session.execute(
                 select(Expense).where(and_(
                     Expense.store_id == store_id,
                     Expense.expense_date == txn_date,
-                    Expense.category == (subcategory or description[:64]),
+                    Expense.category == label,
                     Expense.amount == dec_amount,
                 ))
             )).scalar_one_or_none()
@@ -605,45 +613,64 @@ async def _auto_log(
                 session.add(Expense(
                     store_id=store_id,
                     expense_date=txn_date,
-                    category=subcategory or description[:64],
+                    category=label,
                     amount=dec_amount,
                     notes=f"Auto-logged from bank txn #{txn_id}",
                     last_updated_by="bank_reconciler",
                 ))
                 await session.commit()
-                log.info("Auto-logged expense store=%s %s $%.2f", store_id, subcategory, float(dec_amount))
+                log.info("Auto-logged expense store=%s %s $%.2f", store_id, label, float_amount)
+
+        # Write to Google Sheet + highlight green
+        try:
+            from tools.sheets_tools import log_expense, mark_expense_paid
+            await loop.run_in_executor(None, log_expense, label, float_amount, txn_date)
+            await loop.run_in_executor(None, mark_expense_paid, label, txn_date)
+            log.info("Sheet: expense %s $%.2f on %s → logged + highlighted", label, float_amount, txn_date)
+        except Exception as e:
+            log.warning("Sheet expense write failed for %s: %s", label, e)
 
     elif reconcile_type == "invoice":
         async with get_async_session() as session:
             from sqlalchemy import select, and_
+            vendor_label = subcategory or description[:128]
             existing = (await session.execute(
                 select(Invoice).where(and_(
                     Invoice.store_id == store_id,
                     Invoice.invoice_date == txn_date,
-                    Invoice.vendor == (subcategory or description[:128]),
+                    Invoice.vendor == vendor_label,
                     Invoice.amount == dec_amount,
                 ))
             )).scalar_one_or_none()
             if not existing:
                 session.add(Invoice(
                     store_id=store_id,
-                    vendor=subcategory or description[:128],
+                    vendor=vendor_label,
                     amount=dec_amount,
                     invoice_date=txn_date,
                     matched_bank_transaction_id=txn_id,
                     last_updated_by="bank_reconciler",
                 ))
                 await session.commit()
-                log.info("Auto-logged invoice store=%s vendor=%s $%.2f", store_id, subcategory, float(dec_amount))
+                log.info("Auto-logged invoice store=%s vendor=%s $%.2f", store_id, vendor_label, float_amount)
+
+        # Highlight matching COGS cell green in Google Sheet (invoice already logged by user)
+        try:
+            from tools.sheets_tools import mark_invoice_paid
+            await loop.run_in_executor(None, mark_invoice_paid, subcategory or description[:128], txn_date)
+            log.info("Sheet: invoice %s on %s → highlighted green", subcategory or description[:128], txn_date)
+        except Exception as e:
+            log.warning("Sheet invoice highlight failed for %s: %s", subcategory, e)
 
     elif reconcile_type == "rebate":
         async with get_async_session() as session:
             from sqlalchemy import select, and_
+            vendor_label = subcategory or description[:128]
             existing = (await session.execute(
                 select(Rebate).where(and_(
                     Rebate.store_id == store_id,
                     Rebate.rebate_date == txn_date,
-                    Rebate.vendor == (subcategory or description[:128]),
+                    Rebate.vendor == vendor_label,
                     Rebate.amount == dec_amount,
                 ))
             )).scalar_one_or_none()
@@ -651,13 +678,31 @@ async def _auto_log(
                 session.add(Rebate(
                     store_id=store_id,
                     rebate_date=txn_date,
-                    vendor=subcategory or description[:128],
+                    vendor=vendor_label,
                     amount=dec_amount,
                     notes=f"Auto-logged from bank txn #{txn_id}",
                     last_updated_by="bank_reconciler",
                 ))
                 await session.commit()
-                log.info("Auto-logged rebate store=%s vendor=%s $%.2f", store_id, subcategory, float(dec_amount))
+                log.info("Auto-logged rebate store=%s vendor=%s $%.2f", store_id, vendor_label, float_amount)
+
+        # Write to Google Sheet + highlight green
+        try:
+            from tools.sheets_tools import log_rebate, mark_rebate_paid
+            await loop.run_in_executor(None, log_rebate, subcategory or description[:128], float_amount, txn_date)
+            await loop.run_in_executor(None, mark_rebate_paid, subcategory or description[:128], txn_date)
+            log.info("Sheet: rebate %s $%.2f on %s → logged + highlighted", subcategory, float_amount, txn_date)
+        except Exception as e:
+            log.warning("Sheet rebate write failed for %s: %s", subcategory, e)
+
+    elif reconcile_type == "payroll":
+        # Write payroll to Google Sheet
+        try:
+            from tools.sheets_tools import log_payroll
+            await loop.run_in_executor(None, log_payroll, subcategory or description[:64], float_amount, txn_date)
+            log.info("Sheet: payroll %s $%.2f on %s → logged", subcategory, float_amount, txn_date)
+        except Exception as e:
+            log.warning("Sheet payroll write failed for %s: %s", subcategory, e)
 
 
 # ── Pending review queue ──────────────────────────────────────────────────────
