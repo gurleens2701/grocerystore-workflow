@@ -114,7 +114,30 @@ async def exchange_public_token(store_id: str, public_token: str) -> dict:
         return resp["access_token"], resp["item_id"]
 
     access_token, item_id = await asyncio.get_event_loop().run_in_executor(None, _exchange)
-    await _save_creds(store_id, access_token, item_id)
+
+    # Prime the cursor — advance past all historical transactions so new users
+    # only get transactions from enrollment day forward (not 90 days of history).
+    def _prime_cursor():
+        client = _client()
+        cursor = None
+        has_more = True
+        while has_more:
+            kwargs: dict[str, Any] = {"access_token": access_token}
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = client.transactions_sync(TransactionsSyncRequest(**kwargs))
+            cursor = resp["next_cursor"]
+            has_more = resp["has_more"]
+        return cursor
+
+    try:
+        initial_cursor = await asyncio.get_event_loop().run_in_executor(None, _prime_cursor)
+        log.info("Plaid cursor primed for store=%s — historical transactions skipped", store_id)
+    except Exception as e:
+        log.warning("Cursor priming failed for store=%s: %s — will sync 90 days on first sync", store_id, e)
+        initial_cursor = None
+
+    await _save_creds(store_id, access_token, item_id, cursor=initial_cursor)
     log.info("Plaid connected for store=%s item_id=%s", store_id, item_id)
     return {"access_token": access_token, "item_id": item_id}
 
