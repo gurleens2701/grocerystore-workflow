@@ -1104,6 +1104,14 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     # ── Priority 1: pending daily sheet ─────────────────────────────────────
     sales = await get_state(settings.store_id, _STATE_SALES)
     if sales:
+        # Auto-expire stale sales state after 12h — don't let it hijack chat forever.
+        from db.state import get_state_age_hours
+        age_h = await get_state_age_hours(settings.store_id, _STATE_SALES)
+        if age_h is not None and age_h > 12:
+            log.info("Auto-clearing stale sales state (age=%.1fh)", age_h)
+            await clear_state(settings.store_id, _STATE_SALES)
+            sales = None
+    if sales:
         clean_reply = text.strip().lower()
 
         # ── Cancel — escape from daily report state to normal chat ─────────────
@@ -1164,8 +1172,9 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
             return
 
-        # ── Nothing matched — answer the question, then remind about pending report ──
-        # Pass to the agent so genuine questions / commands work even mid-report.
+        # ── Nothing matched — fall through to the agent. Do NOT nag about the
+        # pending report on every message; user already saw it, and spamming
+        # makes the bot feel robotic.
         from tools.main_agent import run_agent
         history = await _load_history(settings.store_id)
         try:
@@ -1176,13 +1185,9 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             await _save_history(settings.store_id, history, text, reply)
         except Exception as e:
             log.error("Agent failed inside sales state: %s", e, exc_info=True)
-        # Remind them the daily report is still waiting
-        preview = _build_preview(sales)
-        await update.message.reply_text(
-            "⬆️ Answered above. Your daily report is still waiting:\n\n" + preview +
-            "\n\nReply *ok* to save, or *cancel* to dismiss it.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+            await update.message.reply_text(
+                "Sorry, I hit an error. Try again?", parse_mode=None,
+            )
         return
 
     # ── Priority 2: pending invoice items confirmation ───────────────────────

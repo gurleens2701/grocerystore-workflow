@@ -181,13 +181,38 @@ async def check_over_short(store_id: str, today: date) -> list[str]:
     return alerts
 
 
+async def _has_baseline(store_id: str, today: date, min_days: int = 30) -> bool:
+    """
+    Returns True only if the store has at least `min_days` of history.
+    Anomaly detection needs a baseline to compare against — without one,
+    every new category/vendor looks "new" and spams the owner with false alerts.
+    """
+    async with get_async_session() as session:
+        result = await session.execute(
+            select(func.min(DailySales.sale_date)).where(
+                DailySales.store_id == store_id,
+            )
+        )
+        earliest = result.scalar_one_or_none()
+    if earliest is None:
+        return False
+    return (today - earliest).days >= min_days
+
+
 async def run_anomaly_checks(store_id: str, today: date | None = None) -> list[str]:
     """
     Run all anomaly checks. Returns list of alert message strings.
     Call this from nightly sync or month-end summary.
+
+    Skips entirely during the first 30 days after the store's first daily
+    sales entry — anomaly detection needs a baseline to compare against.
     """
     if today is None:
         today = date.today()
+
+    if not await _has_baseline(store_id, today):
+        log.info("[%s] Skipping anomaly checks — less than 30 days of data.", store_id)
+        return []
 
     all_alerts: list[str] = []
 

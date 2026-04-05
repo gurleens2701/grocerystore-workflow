@@ -708,7 +708,17 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
         messages.append(response)
 
         if not getattr(response, "tool_calls", None):
-            return response.content
+            content = response.content
+            # Claude can return a list of content blocks — flatten to text.
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        parts.append(block)
+                content = "\n".join(p for p in parts if p).strip()
+            return content or "…"
 
         for tc in response.tool_calls:
             try:

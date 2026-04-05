@@ -11,9 +11,10 @@ Usage:
     await clear_all_state("moraine")
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from db.database import get_async_session
@@ -29,7 +30,7 @@ async def save_state(store_id: str, key: str, data: dict[str, Any]) -> None:
             state_data=data,
         ).on_conflict_do_update(
             index_elements=["store_id", "state_key"],
-            set_={"state_data": data},
+            set_={"state_data": data, "created_at": func.now()},
         )
         await session.execute(stmt)
 
@@ -56,6 +57,25 @@ async def clear_state(store_id: str, key: str) -> None:
                 PendingState.state_key == key,
             )
         )
+
+
+async def get_state_age_hours(store_id: str, key: str) -> float | None:
+    """Return age in hours of the state row, or None if not found."""
+    async with get_async_session() as session:
+        result = await session.execute(
+            select(PendingState).where(
+                PendingState.store_id == store_id,
+                PendingState.state_key == key,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if not row or not row.created_at:
+            return None
+        created = row.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - created
+        return delta.total_seconds() / 3600.0
 
 
 async def clear_all_state(store_id: str) -> None:
