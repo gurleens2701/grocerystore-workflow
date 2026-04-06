@@ -45,7 +45,6 @@ from tools.intent_router import classify_message
 from tools.invoice_extractor import extract_invoice_from_photo
 from tools.nrs_tools import fetch_daily_sales, fetch_inventory, save_cached_token
 from tools.price_lookup import compile_order, lookup_item_price, parse_order_list
-from tools.health_score import _build_health_score_async, send_weekly_health_score
 from tools.onboarding import (
     ONBOARDING_STEP_NAME, ONBOARDING_STEP_LANG,
     ONBOARDING_STEP_BACKOFFICE, ONBOARDING_STEP_BANK,
@@ -400,11 +399,65 @@ def _parse_right_side(text: str) -> dict[str, float] | None:
 # Bot handlers
 # ---------------------------------------------------------------------------
 
-async def _do_daily_fetch(bot: Bot, chat_id: str) -> bool:
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def _parse_daily_date(text: str) -> str:
+    """
+    Extract a date from a 'daily' command/message. Returns ISO 'YYYY-MM-DD' or "".
+    Accepts: "4-3", "4/3", "2026-04-03", "april 3", "apr 3 2026", "yesterday", "today".
+    """
+    from datetime import date as _date, timedelta as _td
+    s = text.strip().lower()
+    if not s:
+        return ""
+    if "yesterday" in s:
+        return (_date.today() - _td(days=1)).isoformat()
+    if "today" in s:
+        return _date.today().isoformat()
+    today = _date.today()
+    # ISO: 2026-04-03
+    m = re.search(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", s)
+    if m:
+        try:
+            return _date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+        except ValueError:
+            return ""
+    # M-D or M/D (optionally with year)
+    m = re.search(r"\b(\d{1,2})[-/](\d{1,2})(?:[-/](\d{2,4}))?\b", s)
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else today.year
+        if year < 100:
+            year += 2000
+        try:
+            return _date(year, month, day).isoformat()
+        except ValueError:
+            return ""
+    # "april 3" / "apr 3 2026"
+    m = re.search(r"\b(" + "|".join(_MONTHS.keys()) + r")\s+(\d{1,2})(?:,?\s+(\d{4}))?\b", s)
+    if m:
+        month = _MONTHS[m.group(1)]
+        day = int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else today.year
+        try:
+            return _date(year, month, day).isoformat()
+        except ValueError:
+            return ""
+    return ""
+
+
+async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool:
     """Fetch NRS data, send left side + prompt. Returns True on success."""
     try:
-        await bot.send_message(chat_id=chat_id, text="⏳ Fetching today's data from NRS...", parse_mode=None)
-        sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales)
+        label = target_date if target_date else "today's"
+        await bot.send_message(chat_id=chat_id, text=f"⏳ Fetching {label} data from NRS...", parse_mode=None)
+        sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales, target_date)
         await save_state(settings.store_id, _STATE_SALES, sales)
 
         msg = _fmt_left(sales) + _prompt_for_right_side()
@@ -468,7 +521,8 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if profile.get("backoffice") == "manual":
         await _do_manual_daily_prompt(context.bot, settings.telegram_chat_id)
         return ConversationHandler.END
-    ok = await _do_daily_fetch(context.bot, settings.telegram_chat_id)
+    target_date = _parse_daily_date(" ".join(context.args)) if context.args else ""
+    ok = await _do_daily_fetch(context.bot, settings.telegram_chat_id, target_date)
     return AWAITING_RIGHT_SIDE if ok else ConversationHandler.END
 
 
@@ -770,11 +824,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  Or type: I need to order Marlboro and Pepsi\n"
         "  I will tell you the cheapest vendor for each item.\n"
         "\n"
-        "HEALTH SCORE\n"
-        "  Type: health score\n"
-        "  Or: how is my store doing\n"
-        "  I send you a weekly score every Monday morning.\n"
-        "\n"
         "CASH FLOW\n"
         "  Type: cash flow March\n"
         "  I will pull all your sales and expenses and give you a full monthly summary.\n"
@@ -790,7 +839,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  You can also edit the sheet directly — I sync changes every night.\n"
         "\n"
         "WEB DASHBOARD\n"
-        "  View reports, invoices, vendor prices, and health score at:\n"
+        "  View reports, invoices, and vendor prices at:\n"
         f"  http://178.104.61.18\n"
         "\n"
         "SYNC\n"
@@ -1337,7 +1386,8 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         if profile.get("backoffice") == "manual":
             await _do_manual_daily_prompt(context.bot, settings.telegram_chat_id)
         else:
-            await _do_daily_fetch(context.bot, settings.telegram_chat_id)
+            target_date = _parse_daily_date(text)
+            await _do_daily_fetch(context.bot, settings.telegram_chat_id, target_date)
     else:
         from tools.main_agent import run_agent
 
@@ -2232,14 +2282,6 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"⚠️ Sync failed: {e}", parse_mode=None)
 
 
-async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/health — show last week's health score report."""
-    await update.message.reply_text("📊 Calculating weekly health score...", parse_mode=None)
-    try:
-        await send_weekly_health_score(settings.store_id, context.bot, settings.telegram_chat_id)
-    except Exception as e:
-        log.error("Health score command failed: %s", e, exc_info=True)
-        await update.message.reply_text(f"⚠️ Error: {e}", parse_mode=None)
 
 
 # ---------------------------------------------------------------------------
@@ -2308,7 +2350,6 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("vendors", cmd_vendors))
     app.add_handler(CommandHandler("price", cmd_price))
     app.add_handler(CommandHandler("order", cmd_order))
-    app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("bank", cmd_bank))
     app.add_handler(CommandHandler("language", cmd_language))

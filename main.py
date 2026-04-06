@@ -88,6 +88,17 @@ async def run_bot() -> None:
         replace_existing=True,
     )
 
+    # Weekly bank summary — every Sunday at 6 PM
+    from tools.weekly_bank_summary import send_weekly_bank_summary
+    scheduler.add_job(
+        send_weekly_bank_summary,
+        args=[settings.store_id, app.bot, settings.telegram_chat_id],
+        trigger=CronTrigger(day_of_week="sun", hour=18, minute=0, timezone=tz),
+        id="weekly_bank_summary",
+        name="Weekly Bank Summary (Sunday 6 PM)",
+        replace_existing=True,
+    )
+
     # Month-end cash flow summary — last day of month at 8:00 AM
     from tools.cashflow import run_cash_flow_summary
     scheduler.add_job(

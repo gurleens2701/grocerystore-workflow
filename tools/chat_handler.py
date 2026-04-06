@@ -28,7 +28,6 @@ from tools.sheets_tools import (
     log_rebate, log_revenue, resolve_vendor,
 )
 from tools.vendor_agent import get_vendor_comparison
-from tools.health_score import _build_health_score_async
 
 log = logging.getLogger(__name__)
 
@@ -399,9 +398,6 @@ async def process_message(text: str, store_id: str) -> str:
             return await asyncio.get_event_loop().run_in_executor(None, get_vendor_comparison, category)
         except Exception as e:
             return f"⚠️ Error: {e}"
-
-    if lower.startswith("/health"):
-        return await _build_health_score_async(store_id)
 
     if lower.startswith("/invoice "):
         inv_text = text[9:].strip()

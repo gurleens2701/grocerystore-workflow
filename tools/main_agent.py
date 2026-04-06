@@ -268,6 +268,106 @@ def query_prices(product: str) -> str:
     return json.dumps(data) if data else f"No price records found for '{product}'."
 
 
+@tool
+def query_ordered_items(days: int = 7, vendor: str = "") -> str:
+    """
+    Query total inventory ordered (from vendor invoices) over a period.
+    Returns per-vendor totals and a grand total.
+    Use when the user asks: "what's our inventory total this week", "how much was pepsi delivery last month",
+    "total ordered this month", "how much did coremark deliver last week".
+    days: how many days back to look (7 = this week, 30 = this month, etc.)
+    vendor: optional vendor name filter (partial match, e.g. 'pepsi' matches PEPSI).
+    """
+    since = date.today() - timedelta(days=days)
+    with get_sync_session() as session:
+        stmt = select(
+            Invoice.vendor,
+            func.sum(Invoice.amount).label("total"),
+            func.count(Invoice.id).label("count"),
+            func.max(Invoice.invoice_date).label("latest"),
+        ).where(and_(
+            Invoice.store_id == settings.store_id,
+            Invoice.invoice_date >= since,
+        ))
+        if vendor:
+            stmt = stmt.where(Invoice.vendor.ilike(f"%{vendor}%"))
+        stmt = stmt.group_by(Invoice.vendor).order_by(func.sum(Invoice.amount).desc())
+        rows = session.execute(stmt).fetchall()
+
+    if not rows:
+        return f"No invoices found in the last {days} days" + (f" for '{vendor}'" if vendor else "") + "."
+
+    data = []
+    grand_total = 0.0
+    for r in rows:
+        total = float(r.total or 0)
+        grand_total += total
+        data.append({
+            "vendor": r.vendor,
+            "total": total,
+            "invoice_count": r.count,
+            "latest_date": str(r.latest),
+        })
+
+    return json.dumps({"vendors": data, "grand_total": round(grand_total, 2), "period_days": days})
+
+
+@tool
+def query_bank_transactions(days: int = 7, status: str = "") -> str:
+    """
+    Query bank transactions synced from Plaid.
+    Use when the user asks: "what cleared this week", "did we pay McLane",
+    "show unmatched bank transactions", "bank activity last week", "what's pending in the bank".
+    days: how many days back (default 7).
+    status: optional filter — "matched" (matched to invoice/expense), "unmatched" (needs review), or "" (all).
+    """
+    from db.models import BankTransaction
+    since = date.today() - timedelta(days=days)
+    with get_sync_session() as session:
+        stmt = select(BankTransaction).where(and_(
+            BankTransaction.store_id == settings.store_id,
+            BankTransaction.transaction_date >= since,
+        ))
+        if status == "matched":
+            stmt = stmt.where(BankTransaction.is_matched == True)
+        elif status == "unmatched":
+            stmt = stmt.where(BankTransaction.is_matched == False)
+        rows = session.execute(
+            stmt.order_by(BankTransaction.transaction_date.desc()).limit(100)
+        ).scalars().all()
+
+    if not rows:
+        return f"No bank transactions found in the last {days} days."
+
+    data = []
+    total_in = 0.0
+    total_out = 0.0
+    for r in rows:
+        amt = float(r.amount or 0)
+        if amt < 0:
+            total_in += abs(amt)
+        else:
+            total_out += amt
+        data.append({
+            "date": str(r.transaction_date),
+            "amount": amt,
+            "description": r.description,
+            "category": r.category or "",
+            "type": r.transaction_type or "",
+            "matched": r.is_matched,
+            "reconcile_type": r.reconcile_type or "",
+            "subcategory": r.reconcile_subcategory or "",
+        })
+
+    return json.dumps({
+        "transactions": data,
+        "total_deposits": round(total_in, 2),
+        "total_payments": round(total_out, 2),
+        "count": len(data),
+        "period_days": days,
+    })
+
+
 # ---------------------------------------------------------------------------
 # WRITE TOOLS
 # ---------------------------------------------------------------------------
@@ -604,6 +704,8 @@ _ALL_TOOLS = [
     query_revenue,
     query_prices,
     query_vendors,
+    query_ordered_items,
+    query_bank_transactions,
     # Write
     log_expense,
     log_invoice,
@@ -634,6 +736,7 @@ COMMUNICATION RULES:
 - Keep answers SHORT — 2 to 4 sentences normally. Give more only when analyzing data or giving advice.
 - Never say "based on your database" or "according to records" — just say the answer naturally.
 - If someone greets you, greet back naturally and offer to help.
+- WHEN UNSURE: If you are not sure what the user is asking — ASK them to clarify BEFORE answering. Do NOT guess and give a wrong answer. A short "Did you mean X or Y?" is much better than a wrong reply. This is critical — a wrong answer is worse than asking.
 
 DATA & LOGGING RULES:
 - Use tools to answer data questions (sales, expenses, invoices, prices, vendors, revenue).
@@ -652,6 +755,9 @@ PARSING USER INPUTS:
 - When a user asks "what were my sales yesterday" or "what was my sale yesterday", use query_sales. This is NOT a daily report trigger.
 - When a user says "electricity 340 march" or "rent 1200", call log_expense.
 - When a user says "altria rebate 500", call log_rebate.
+- When a user asks "total inventory this week" or "how much was pepsi delivery last month", use query_ordered_items. This queries vendor invoice totals over a period.
+- When a user asks about bank activity, cleared payments, unmatched transactions, or pending invoices in the bank, use query_bank_transactions.
+- When a user asks about price or cost of an item (e.g. "price of marlboro", "what does mountain dew cost"), use query_prices.
 
 BUSINESS ADVISOR ROLE:
 - When you show the owner data, also give a short insight if something stands out. For example: "Your cigarette sales dropped 12% this week — that sometimes happens when a competitor runs a promotion nearby."

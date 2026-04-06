@@ -22,7 +22,6 @@ from db.database import get_session_for_store
 from db.models import BankTransaction, DailySales, Expense, Invoice, InvoiceItem, MessageLog, Rebate, TransactionRule
 from db.ops import log_message
 from tools.chat_handler import process_message as chat_process_message
-from tools.health_score import _build_health_score_async, _build_health_score_structured
 from tools.price_lookup import _compile_order_async, _lookup_item_price_async, parse_order_list
 
 app = FastAPI(title="Gas Station Dashboard API", docs_url=None, redoc_url=None)
@@ -171,20 +170,6 @@ def _calc_over_short(r: DailySales) -> Optional[float]:
     ])
     return round(total_payments - float(r.grand_total or 0), 2)
 
-
-# ---------------------------------------------------------------------------
-# Health score route
-# ---------------------------------------------------------------------------
-
-@app.get("/api/health")
-async def get_health(
-    store_id: Optional[str] = Query(None),
-    period: str = Query("this_week"),
-    user: dict = Depends(get_current_user),
-):
-    sid = resolve_store(store_id, user)
-    data = await _build_health_score_structured(sid, period=period)
-    return data
 
 
 # ---------------------------------------------------------------------------

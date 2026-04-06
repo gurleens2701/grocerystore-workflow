@@ -46,8 +46,10 @@ def classify_message(text: str) -> str:
     """
     clean = text.strip().lower()
 
-    # /daily command
+    # /daily command (optionally with date args: "/daily 4-3", "daily april 3", "daily for 4-3")
     if clean in ("/daily", "daily"):
+        return "daily_fetch"
+    if clean.startswith(("/daily ", "daily ")) or clean.startswith("daily for "):
         return "daily_fetch"
 
     # Check for trigger phrases, but NOT if it looks like a question
