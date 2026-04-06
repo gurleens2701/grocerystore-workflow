@@ -248,9 +248,13 @@ async def get_daily_sales(target_date: date | None = None) -> dict[str, Any]:
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
+    # NRS API path uses "yesterday" which offsets by -1 day internally.
+    # Pass target_date + 1 so the API returns data for the actual target_date.
+    api_date = target_date + timedelta(days=1)
+
     token = await _get_token()
     try:
-        data = await _get_stats(token, target_date)
+        data = await _get_stats(token, api_date)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
             clear_cached_token_sync(settings.store_id)
@@ -382,9 +386,12 @@ async def get_transaction_list(target_date: date | None = None) -> list[dict[str
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
+    # NRS API "yesterday" path offsets by -1 day; compensate with +1
+    api_date = target_date + timedelta(days=1)
+
     token = await _get_token()
     try:
-        data = await _get_stats(token, target_date)
+        data = await _get_stats(token, api_date)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
             clear_cached_token_sync(settings.store_id)
