@@ -376,13 +376,5 @@ async def run_nightly_sync(store_id: str) -> None:
             store_id, sales_count, exp_count, reb_count, rev_count, inv_count, total,
         )
 
-        # Run anomaly checks after sync so we have latest data
-        from tools.alerts import run_anomaly_checks
-        from db.state import save_state
-        alerts = await run_anomaly_checks(store_id, today)
-        if alerts:
-            log.info("[%s] %d anomalies found — stored for Telegram delivery.", store_id, len(alerts))
-            await save_state(store_id, "pending_alerts", {"alerts": alerts, "date": str(today)})
-
     except Exception as e:
         log.error("[%s] Nightly sync failed: %s", store_id, e, exc_info=True)

@@ -19,7 +19,6 @@ from sqlalchemy import func, select
 from config.settings import settings
 from db.database import get_async_session
 from db.models import DailySales, Expense, Invoice, Rebate, Revenue
-from tools.alerts import run_anomaly_checks
 
 log = logging.getLogger(__name__)
 
@@ -136,10 +135,6 @@ async def generate_cash_flow(store_id: str, year: int, month: int) -> dict:
     # ------------------------------------------------------------ net cash flow
     net_cash_flow = total_sales - total_expenses - total_invoices + total_rebates
 
-    # --------------------------------------------------------- anomaly alerts
-    check_date = date(year, month, 1)
-    alerts = await run_anomaly_checks(store_id, today=check_date)
-
     return {
         "period": period,
         "total_sales": total_sales,
@@ -156,7 +151,7 @@ async def generate_cash_flow(store_id: str, year: int, month: int) -> dict:
         "net_cash_flow": net_cash_flow,
         "over_short_total": over_short_total,
         "over_short_avg": over_short_avg,
-        "alerts": alerts,
+        "alerts": [],
     }
 
 

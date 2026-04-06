@@ -113,17 +113,6 @@ async def run_bot() -> None:
     async with app:
         await app.start()
 
-        # Send any anomaly alerts queued by last night's sync
-        from db.state import get_state, clear_state
-        pending = await get_state(settings.store_id, "pending_alerts")
-        if pending and pending.get("alerts"):
-            alerts_text = "\n".join(pending["alerts"])
-            await app.bot.send_message(
-                chat_id=settings.telegram_chat_id,
-                text=f"🚨 *Anomaly Alerts ({pending.get('date', 'yesterday')})*\n\n{alerts_text}",
-                parse_mode="Markdown",
-            )
-            await clear_state(settings.store_id, "pending_alerts")
 
         scheduler.start()
 
