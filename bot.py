@@ -789,64 +789,49 @@ async def _extract_invoice_via_claude(photo_bytes: bytes) -> dict[str, Any] | No
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/help — show all available features."""
     msg = (
-        "Here is everything I can do for you:\n"
+        "What I can do:\n"
         "\n"
-        "DAILY SALES\n"
-        "I automatically send your sales numbers every morning at 7AM.\n"
-        "You reply with 3 numbers (Lotto PO, Lotto Credit, Food Stamp) to complete the sheet.\n"
-        "Or type: daily report\n"
+        "SALES\n"
+        '  "How much did I make this week?"\n'
+        '  "What was my best day in March?"\n'
+        '  "How much cash did I drop this month?"\n'
         "\n"
         "INVOICES\n"
-        "Take a photo of any vendor invoice and send it — I will read it and log it.\n"
-        "Or send it as a file for better accuracy.\n"
-        "Or just type: Pepsi $300 March 22\n"
-        "Command: /invoice Pepsi 300 3/22\n"
+        '  Send a photo of any invoice — I will read and log it.\n'
+        '  Or type: "Pepsi 300 march 22"\n'
+        '  "How much was Pepsi delivery last week?"\n'
+        '  "Total inventory ordered this month?"\n'
         "\n"
         "EXPENSES\n"
-        "Type things like:\n"
-        "  electricity $340 March 10\n"
-        "  rent $2500\n"
-        "  payroll $1200 this week\n"
+        '  "electricity 340 march 10"\n'
+        '  "rent 2500"\n'
+        '  "payroll simmt 1200"\n'
         "\n"
-        "QUESTIONS — ask me anything\n"
-        "  How much did I make this week?\n"
-        "  What did I spend on McLane last month?\n"
-        "  Who is my cheapest vendor for cigarettes?\n"
-        "  What was my best day in March?\n"
-        "  How much cash did I drop this month?\n"
-        "  Do I owe Roma anything?\n"
+        "REBATES\n"
+        '  "altria rebate 500 march"\n'
+        '  "How much rebates this month?"\n'
         "\n"
-        "VENDOR PRICES\n"
-        "  /price marlboro red\n"
-        "  /vendors — compare all vendors by category\n"
+        "PRICES\n"
+        '  "Price of marlboro red?"\n'
+        '  "What does mountain dew 20oz cost?"\n'
         "\n"
-        "ORDERS\n"
-        "  /order chips water energy drinks\n"
-        "  Or type: I need to order Marlboro and Pepsi\n"
-        "  I will tell you the cheapest vendor for each item.\n"
+        "BANK\n"
+        '  "What cleared this week?"\n'
+        '  "Any unmatched bank transactions?"\n'
+        '  Weekly summary sent every Sunday at 6PM.\n'
         "\n"
-        "CASH FLOW\n"
-        "  Type: cash flow March\n"
-        "  I will pull all your sales and expenses and give you a full monthly summary.\n"
+        "VENDORS\n"
+        '  "Who are my vendors?"\n'
+        '  "How much did I spend on McLane?"\n'
         "\n"
-        "VOICE MESSAGES\n"
-        "  Send me a voice message in any language — I will understand and reply.\n"
-        "  Set your language: /language hindi\n"
-        "  Available: Hindi, Gujarati, Punjabi, Spanish, Arabic, Urdu, Bengali,\n"
-        "             Chinese, Korean, Vietnamese, Portuguese, French, English\n"
+        "VOICE\n"
+        "  Send a voice message in any language.\n"
         "\n"
-        "GOOGLE SHEET\n"
-        "  Everything is automatically saved to your Google Sheet.\n"
-        "  You can also edit the sheet directly — I sync changes every night.\n"
+        "COMMANDS\n"
+        "  /daily — fetch yesterday's sales from NRS\n"
+        "  /sync — pull latest from Google Sheet\n"
         "\n"
-        "WEB DASHBOARD\n"
-        "  View reports, invoices, and vendor prices at:\n"
-        f"  http://178.104.61.18\n"
-        "\n"
-        "SYNC\n"
-        "  /sync — manually pull latest changes from your Google Sheet right now.\n"
-        "\n"
-        "Just talk to me naturally — you do not need to use commands."
+        "Just talk to me naturally. I speak Hindi, Gujarati, Punjabi, and more."
     )
     await update.message.reply_text(msg, parse_mode=None)
 
