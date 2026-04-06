@@ -439,8 +439,8 @@ def _parse_daily_date(text: str) -> str:
             return _date(year, month, day).isoformat()
         except ValueError:
             return ""
-    # "april 3" / "apr 3 2026"
-    m = re.search(r"\b(" + "|".join(_MONTHS.keys()) + r")\s+(\d{1,2})(?:,?\s+(\d{4}))?\b", s)
+    # "april 3" / "apr 3rd" / "april 2nd 2026"
+    m = re.search(r"\b(" + "|".join(_MONTHS.keys()) + r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\b", s)
     if m:
         month = _MONTHS[m.group(1)]
         day = int(m.group(2))
