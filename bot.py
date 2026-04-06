@@ -2011,13 +2011,13 @@ async def notify_bank_sync_results(result: dict, bot: Bot | None = None) -> None
         except Exception as e:
             log.warning("Invoice paid alert failed: %s", e)
 
-    for txn in needs_review[:10]:
+    for txn in needs_review:
         try:
             await send_bank_review_request(bot, txn)
         except Exception as e:
             log.warning("Review request failed for txn %s: %s", txn.get("id"), e)
 
-    for txn in auto_list[:10]:
+    for txn in auto_list:
         try:
             await send_bank_auto_review(bot, txn)
         except Exception as e:
