@@ -278,7 +278,7 @@ class InvoiceItem(Base):
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)   # TOBACCO, BEVERAGE, GROCERY, etc.
     invoice_date: Mapped[date_type] = mapped_column(Date, nullable=False, index=True)
     canonical_name: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)  # e.g. MARLBORO-RED-SHORT
-    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)  # 0.0–1.0
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)  # 0–100
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
