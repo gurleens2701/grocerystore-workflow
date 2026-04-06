@@ -816,9 +816,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         '  "What does mountain dew 20oz cost?"\n'
         "\n"
         "BANK\n"
-        '  "What cleared this week?"\n'
-        '  "Any unmatched bank transactions?"\n'
-        '  Weekly summary sent every Sunday at 6PM.\n'
+        "  Weekly summary sent every Sunday at 6PM.\n"
         "\n"
         "VENDORS\n"
         '  "Who are my vendors?"\n'
