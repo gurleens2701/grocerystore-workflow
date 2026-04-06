@@ -455,6 +455,7 @@ def _parse_daily_date(text: str) -> str:
 async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool:
     """Fetch NRS data, send left side + prompt. Returns True on success."""
     try:
+        log.info("_do_daily_fetch called with target_date=%r", target_date)
         label = target_date if target_date else "today's"
         await bot.send_message(chat_id=chat_id, text=f"⏳ Fetching {label} data from NRS...", parse_mode=None)
         sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales, target_date)

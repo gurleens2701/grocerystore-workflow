@@ -248,6 +248,8 @@ async def get_daily_sales(target_date: date | None = None) -> dict[str, Any]:
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
+    log.info("get_daily_sales: target_date=%s", target_date)
+
     token = await _get_token()
     try:
         data = await _get_stats(token, target_date)
