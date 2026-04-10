@@ -745,13 +745,15 @@ async def get_pending_reviews(store_id: str) -> list[dict]:
 
 async def check_cc_settlements(store_id: str) -> list[dict]:
     """
-    Match bank CC deposit transactions to DailySales.card totals.
+    Match NEW bank CC deposit transactions to DailySales.card totals.
     Settlement usually arrives 1-5 business days after the sale day.
 
-    For each CC deposit:
-      - Find the best matching DailySales.card within a date window
-      - If within $1: auto-match, highlight Google Sheet CREDIT cell green
-      - If >$1 diff: report as mismatch
+    Only processes CC deposits where is_matched=False (never notified before).
+    After reporting a deposit (match or mismatch), sets is_matched=True so it
+    won't be re-reported on future runs. The 14-day window still applies — it
+    gives late-posting deposits time to be picked up, and also gives the
+    corresponding DailySales time to be entered (deposits with no sales data
+    yet are left unprocessed and retried next run).
 
     Returns list of match/mismatch dicts with keys:
       bank_txn_id, bank_date, bank_amount, bank_desc, sale_date, sale_card, diff, matched
@@ -764,7 +766,9 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
     results = []
 
     async with get_async_session() as session:
-        # Get CC settlement deposits from past 14 days (amount < 0 = money IN to account)
+        # Only fetch CC deposits we haven't already notified about.
+        # is_matched is unused for negative-amount txns elsewhere (match_transactions
+        # only looks at amount > 0), so it's safe to repurpose as a "notified" flag here.
         since = date.today() - timedelta(days=14)
         cc_deposits = (await session.execute(
             select(BankTransaction).where(and_(
@@ -772,27 +776,19 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
                 BankTransaction.transaction_date >= since,
                 BankTransaction.amount < 0,  # deposit (money in)
                 BankTransaction.reconcile_type == "cc_settlement",
+                BankTransaction.is_matched == False,  # not yet notified
             ))
         )).scalars().all()
 
-        # Track which sale days are already matched (avoid double-matching)
-        matched_sale_days = set()
-        # Check which days were already highlighted (cc_matched flag in DB)
-        already_matched_txn_ids = set()
-        for dep in cc_deposits:
-            if getattr(dep, 'cc_matched_sale_date', None):
-                already_matched_txn_ids.add(dep.id)
-                matched_sale_days.add(dep.cc_matched_sale_date)
+        # Track which sale days this batch has claimed, to avoid two deposits
+        # fighting over the same day.
+        claimed_sale_days: set[str] = set()
 
         for dep in cc_deposits:
             bank_amount = abs(float(dep.amount))
             dep_date = dep.transaction_date
 
-            # Skip if already matched in a previous run
-            if dep.id in already_matched_txn_ids:
-                continue
-
-            # Look for daily_sales within -1 to +5 days (settlement timing varies)
+            # Look for daily_sales within -5 to +1 days (settlement timing varies)
             date_lo = dep_date - timedelta(days=5)
             date_hi = dep_date + timedelta(days=1)
 
@@ -804,11 +800,12 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
                 ))
             )).scalars().all()
 
+            # No sales entered yet in the window — leave deposit unprocessed and
+            # retry on the next run (don't notify, don't mark).
             if not daily_rows:
                 continue
 
-            # Filter out already-matched sale days
-            available = [r for r in daily_rows if str(r.sale_date) not in matched_sale_days]
+            available = [r for r in daily_rows if str(r.sale_date) not in claimed_sale_days]
             if not available:
                 continue
 
@@ -816,6 +813,7 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
             best = min(available, key=lambda r: abs(float(r.card) - bank_amount))
             sale_card = float(best.card)
             diff = round(bank_amount - sale_card, 2)
+            is_match = abs(diff) <= 50.00
 
             entry = {
                 "bank_txn_id":  dep.id,
@@ -825,12 +823,11 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
                 "sale_date":    str(best.sale_date),
                 "sale_card":    sale_card,
                 "diff":         diff,
-                "matched":      abs(diff) <= 50.00,  # within $50 = matched
+                "matched":      is_match,
             }
 
-            if abs(diff) <= 50.00:
-                # Good match — highlight in Google Sheet
-                matched_sale_days.add(str(best.sale_date))
+            if is_match:
+                claimed_sale_days.add(str(best.sale_date))
                 try:
                     from tools.sheets_tools import mark_cc_settled
                     await asyncio.get_event_loop().run_in_executor(
@@ -841,6 +838,10 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
                 except Exception as e:
                     log.warning("CC sheet highlight failed: %s", e)
 
+            # Mark notified so future runs skip this deposit (match or mismatch).
+            dep.is_matched = True
             results.append(entry)
+
+        await session.commit()
 
     return results
