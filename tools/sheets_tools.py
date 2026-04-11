@@ -1022,6 +1022,128 @@ def mark_rebate_paid(vendor: str, entry_date: date) -> str:
     return f"Marked PAID: {col_name} rebate on {entry_date}"
 
 
+# ---------------------------------------------------------------------------
+# Combined log-if-empty + highlight helpers (used by bank reconciler)
+# ---------------------------------------------------------------------------
+
+_PAID_GREEN = {"red": 0.71, "green": 0.84, "blue": 0.66}
+
+
+def _read_cell_value(sheet, cell: str) -> float | None:
+    """Read a single cell and return its parsed numeric value, or None if empty."""
+    try:
+        vals = sheet.get(cell)
+        if vals and vals[0]:
+            return _parse_cell_amount(vals[0][0])
+    except Exception:
+        pass
+    return None
+
+
+def log_expense_and_highlight(category: str, amount: float, entry_date: date) -> str:
+    """Log expense to sheet if cell is empty, always highlight green.
+    Preserves any existing manually-entered value in the cell.
+    """
+    col_name = resolve_expense_category(category)
+    if not col_name:
+        col_name = "INVENTORY"  # fallback
+    col_idx = EXPENSES_HEADERS.index(col_name) + 1
+    target_row = _EXP_DATA_START + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+
+    client = _get_client()
+    sheet = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+
+    existing = _read_cell_value(sheet, cell)
+    if existing is None:
+        sheet.update(cell, [[amount]])
+        action = f"logged ${amount:.2f}"
+    else:
+        action = f"kept existing ${existing:.2f}"
+
+    sheet.format(cell, {"backgroundColor": _PAID_GREEN})
+    return f"Expense {col_name} on {entry_date}: {action}, highlighted"
+
+
+def log_invoice_and_highlight(vendor: str, amount: float, entry_date: date) -> str:
+    """Log COGS invoice to sheet if cell is empty, always highlight green.
+    Preserves any existing manually-entered value in the cell.
+    """
+    exact_vendor = resolve_vendor(vendor)
+    if exact_vendor not in _VENDOR_COL_INDEX or exact_vendor in ("DATE", "TOTAL"):
+        return f"Vendor {vendor!r} not in COGS columns — skipped"
+
+    col_idx = _VENDOR_COL_INDEX[exact_vendor]
+    target_row = _COGS_DATA_START + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+
+    client = _get_client()
+    sheet = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+
+    existing = _read_cell_value(sheet, cell)
+    if existing is None:
+        sheet.update(cell, [[amount]])
+        action = f"logged ${amount:.2f}"
+    else:
+        action = f"kept existing ${existing:.2f}"
+
+    sheet.format(cell, {"backgroundColor": _PAID_GREEN})
+    return f"COGS {exact_vendor} on {entry_date}: {action}, highlighted"
+
+
+def log_rebate_and_highlight(vendor: str, amount: float, entry_date: date) -> str:
+    """Log rebate to sheet if cell is empty, always highlight green.
+    Preserves any existing manually-entered value in the cell.
+    """
+    col_name = resolve_rebate_vendor(vendor)
+    if not col_name:
+        col_name = "MISCELLANEOUS"
+    col_idx = REBATES_HEADERS.index(col_name) + 1
+    target_row = _REV_DATA_START + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+
+    client = _get_client()
+    sheet = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+
+    existing = _read_cell_value(sheet, cell)
+    if existing is None:
+        sheet.update(cell, [[amount]])
+        action = f"logged ${amount:.2f}"
+    else:
+        action = f"kept existing ${existing:.2f}"
+
+    sheet.format(cell, {"backgroundColor": _PAID_GREEN})
+    return f"Rebate {col_name} on {entry_date}: {action}, highlighted"
+
+
+def log_payroll_and_highlight(employee: str, amount: float, entry_date: date) -> str:
+    """Log payroll to sheet if cell is empty, always highlight green.
+    Preserves any existing manually-entered value in the cell.
+    If employee name can't be resolved to a known column, skips cleanly.
+    """
+    col_name = resolve_payroll_name(employee)
+    if not col_name:
+        return f"Payroll employee '{employee}' not in PAYROLL columns — skipped"
+
+    local_idx = PAYROLL_HEADERS.index(col_name)
+    col_idx = _PAYROLL_COL_START + local_idx
+    target_row = _EXP_DATA_START + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+
+    client = _get_client()
+    sheet = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+
+    existing = _read_cell_value(sheet, cell)
+    if existing is None:
+        sheet.update(cell, [[amount]])
+        action = f"logged ${amount:.2f}"
+    else:
+        action = f"kept existing ${existing:.2f}"
+
+    sheet.format(cell, {"backgroundColor": _PAID_GREEN})
+    return f"Payroll {col_name} on {entry_date}: {action}, highlighted"
+
+
 def match_description_to_cogs_vendor(description: str) -> str | None:
     """Return the COGS vendor column name if any alias appears in the description."""
     desc_lower = description.lower()

@@ -621,12 +621,13 @@ async def _auto_log(
                 await session.commit()
                 log.info("Auto-logged expense store=%s %s $%.2f", store_id, label, float_amount)
 
-        # Write to Google Sheet + highlight green
+        # Write to Google Sheet (log if empty) + highlight green
         try:
-            from tools.sheets_tools import log_expense, mark_expense_paid
-            await loop.run_in_executor(None, log_expense, label, float_amount, txn_date)
-            await loop.run_in_executor(None, mark_expense_paid, label, txn_date)
-            log.info("Sheet: expense %s $%.2f on %s → logged + highlighted", label, float_amount, txn_date)
+            from tools.sheets_tools import log_expense_and_highlight
+            result = await loop.run_in_executor(
+                None, log_expense_and_highlight, label, float_amount, txn_date
+            )
+            log.info("Sheet: %s", result)
         except Exception as e:
             log.warning("Sheet expense write failed for %s: %s", label, e)
 
@@ -654,13 +655,15 @@ async def _auto_log(
                 await session.commit()
                 log.info("Auto-logged invoice store=%s vendor=%s $%.2f", store_id, vendor_label, float_amount)
 
-        # Highlight matching COGS cell green in Google Sheet (invoice already logged by user)
+        # Write to Google Sheet (log COGS if empty) + highlight green
         try:
-            from tools.sheets_tools import mark_invoice_paid
-            await loop.run_in_executor(None, mark_invoice_paid, subcategory or description[:128], txn_date)
-            log.info("Sheet: invoice %s on %s → highlighted green", subcategory or description[:128], txn_date)
+            from tools.sheets_tools import log_invoice_and_highlight
+            result = await loop.run_in_executor(
+                None, log_invoice_and_highlight, vendor_label, float_amount, txn_date
+            )
+            log.info("Sheet: %s", result)
         except Exception as e:
-            log.warning("Sheet invoice highlight failed for %s: %s", subcategory, e)
+            log.warning("Sheet invoice write failed for %s: %s", subcategory, e)
 
     elif reconcile_type == "rebate":
         async with get_async_session() as session:
@@ -686,21 +689,25 @@ async def _auto_log(
                 await session.commit()
                 log.info("Auto-logged rebate store=%s vendor=%s $%.2f", store_id, vendor_label, float_amount)
 
-        # Write to Google Sheet + highlight green
+        # Write to Google Sheet (log if empty) + highlight green
         try:
-            from tools.sheets_tools import log_rebate, mark_rebate_paid
-            await loop.run_in_executor(None, log_rebate, subcategory or description[:128], float_amount, txn_date)
-            await loop.run_in_executor(None, mark_rebate_paid, subcategory or description[:128], txn_date)
-            log.info("Sheet: rebate %s $%.2f on %s → logged + highlighted", subcategory, float_amount, txn_date)
+            from tools.sheets_tools import log_rebate_and_highlight
+            result = await loop.run_in_executor(
+                None, log_rebate_and_highlight, vendor_label, float_amount, txn_date
+            )
+            log.info("Sheet: %s", result)
         except Exception as e:
             log.warning("Sheet rebate write failed for %s: %s", subcategory, e)
 
     elif reconcile_type == "payroll":
-        # Write payroll to Google Sheet
+        # Write to Google Sheet (log if empty) + highlight green
         try:
-            from tools.sheets_tools import log_payroll
-            await loop.run_in_executor(None, log_payroll, subcategory or description[:64], float_amount, txn_date)
-            log.info("Sheet: payroll %s $%.2f on %s → logged", subcategory, float_amount, txn_date)
+            from tools.sheets_tools import log_payroll_and_highlight
+            employee_label = subcategory or description[:64]
+            result = await loop.run_in_executor(
+                None, log_payroll_and_highlight, employee_label, float_amount, txn_date
+            )
+            log.info("Sheet: %s", result)
         except Exception as e:
             log.warning("Sheet payroll write failed for %s: %s", subcategory, e)
 
