@@ -1958,44 +1958,73 @@ async def send_bank_auto_review(bot: Bot, txn: dict) -> None:
 
 
 async def send_cc_settlement_alert(bot: Bot, settlement: dict) -> None:
-    """Notify owner of a CC settlement match or mismatch.
+    """Notify owner of a CC settlement match, mismatch, or ambiguous case.
 
-    Matches are info-only. Mismatches include a [Resolve] button the user can
-    tap to mark the sale day as manually reconciled (e.g. for a monthly fee hold).
+    Matches are info-only (plus Resolve buttons for any skipped older days).
+    Ambiguous = multiple contiguous ranges tight-matched; user picks which.
+    Mismatch = no range matched; user can Resolve the flagged day.
     """
     diff = settlement["diff"]
     matched = settlement.get("matched", False)
     skipped_days = settlement.get("skipped_days") or []
+    settled_days = settlement.get("settled_days") or []
     ambiguous = settlement.get("ambiguous", False)
     reply_markup = None
 
     if matched:
+        # Single day or multi-day range auto-settled
+        header_days = (
+            settled_days[0] if len(settled_days) == 1
+            else f"{settled_days[0]} → {settled_days[-1]} ({len(settled_days)} days)"
+        )
         text = (
             f"✅ *CC Settlement Matched*\n"
             f"{'─'*32}\n"
             f"  Bank deposit: *${settlement['bank_amount']:,.2f}* on {settlement['bank_date']}\n"
-            f"  Matched to: {settlement['sale_date']} card total *${settlement['sale_card']:,.2f}*\n"
+            f"  Matched to: {header_days}\n"
+            f"  Card total: *${settlement['sale_card']:,.2f}*\n"
         )
         if abs(diff) > 0.01:
             text += f"  Diff: ${abs(diff):,.2f}\n"
-        text += f"  Sheet CREDIT cell highlighted green."
-
-        if ambiguous:
-            opts = ", ".join(settlement.get("ambiguous_options") or [])
-            text += f"\n\n⚠️ Ambiguous: multiple days had the same total ({opts}). Verify manually if needed."
+        text += f"  Sheet CREDIT cells highlighted green."
 
         if skipped_days:
             days_str = ", ".join(skipped_days)
             text += (
                 f"\n\n⚠️ Older unsettled day(s) skipped: *{days_str}*\n"
-                f"Likely fee hold or held batch. Tap Resolve on those alerts "
+                f"Likely fee hold or held batch. Tap below to mark resolved "
                 f"once you've confirmed with the processor."
             )
             buttons = [
-                [InlineKeyboardButton(f"Resolve {d}", callback_data=f"cc_resolve:{d}")]
+                [InlineKeyboardButton(f"✓ Resolve {d}", callback_data=f"cc_resolve:{d}")]
                 for d in skipped_days
             ]
             reply_markup = InlineKeyboardMarkup(buttons)
+
+    elif ambiguous:
+        options = settlement.get("ambiguous_options") or []
+        text = (
+            f"❓ *CC Settlement Ambiguous*\n"
+            f"{'─'*32}\n"
+            f"  Bank deposit: ${settlement['bank_amount']:,.2f} on {settlement['bank_date']}\n\n"
+            f"Multiple day combinations match this deposit. Pick the right one:\n\n"
+        )
+        buttons = []
+        for idx, opt in enumerate(options[:6], 1):  # cap at 6 options
+            text += f"  {idx}. {opt['label']} — ${opt['total']:,.2f}\n"
+            # Callback encodes all days comma-separated; handler will settle all
+            days_payload = ",".join(opt["days"])
+            buttons.append([InlineKeyboardButton(
+                f"{idx}. Settle {opt['label']}",
+                callback_data=f"cc_pick:{settlement['bank_txn_id']}:{days_payload}",
+            )])
+        text += "\nOr tap Skip to leave them for manual review."
+        buttons.append([InlineKeyboardButton(
+            "Skip",
+            callback_data=f"cc_skip:{settlement['bank_txn_id']}",
+        )])
+        reply_markup = InlineKeyboardMarkup(buttons)
+
     else:
         diff_str = f"+${diff:,.2f} (bank over)" if diff > 0 else f"-${abs(diff):,.2f} (short)"
         text = (
@@ -2009,8 +2038,9 @@ async def send_cc_settlement_alert(bot: Bot, settlement: dict) -> None:
             text += "This is a real shortage — call the credit card processor.\n\n"
         else:
             text += (
-                "Could be a monthly fee hold or timing issue. If you've confirmed "
-                f"the {settlement['sale_date']} day is handled, tap Resolve to stop alerts.\n\n"
+                "Could be a fee hold, multi-day batch the matcher couldn't align, "
+                f"or timing issue. If you've confirmed the {settlement['sale_date']} "
+                f"day is handled, tap Resolve to stop alerts.\n\n"
             )
         text += "Dashboard: clerkai.live/bank"
 
@@ -2128,6 +2158,34 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"Couldn't find sale day {sale_date_iso}.",
                 parse_mode=None,
             )
+        return
+
+    # ── CC ambiguous: user picked which range to settle ──────────────────────
+    if data.startswith("cc_pick:"):
+        _, bank_txn_id_str, days_csv = data.split(":", 2)
+        bank_txn_id = int(bank_txn_id_str)
+        day_isos = days_csv.split(",")
+        from tools.bank_reconciler import settle_cc_days_with_deposit
+        ok = await settle_cc_days_with_deposit(store_id, bank_txn_id, day_isos)
+        if ok:
+            label = day_isos[0] if len(day_isos) == 1 else f"{day_isos[0]} → {day_isos[-1]}"
+            await query.edit_message_text(
+                f"✓ Settled {label} ({len(day_isos)} day{'s' if len(day_isos) > 1 else ''}). Sheet highlighted.",
+                parse_mode=None,
+            )
+        else:
+            await query.edit_message_text("Couldn't settle — deposit or days not found.", parse_mode=None)
+        return
+
+    # ── CC ambiguous: user chose to skip ──────────────────────────────────────
+    if data.startswith("cc_skip:"):
+        bank_txn_id = int(data.split(":", 1)[1])
+        from tools.bank_reconciler import skip_cc_deposit
+        await skip_cc_deposit(store_id, bank_txn_id)
+        await query.edit_message_text(
+            "Skipped. Days stay unsettled — resolve manually from the dashboard.",
+            parse_mode=None,
+        )
         return
 
     # ── Check-match Yes / No ──────────────────────────────────────────────────
@@ -2395,7 +2453,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("bank", cmd_bank))
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("token", cmd_token))
-    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^(bk|cc_resolve:)"))
+    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^(bk|cc_resolve:|cc_pick:|cc_skip:)"))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_invoice_photo))

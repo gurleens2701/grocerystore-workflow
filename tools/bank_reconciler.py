@@ -756,27 +756,56 @@ def _is_tight_match(deposit: float, card: float) -> bool:
     return -_CC_TOLERANCE_SHORT <= diff <= _CC_TOLERANCE_OVER
 
 
+def _find_tight_ranges(
+    daily_rows: list,
+    deposit: float,
+) -> list[tuple[int, int, float]]:
+    """
+    Find all contiguous ranges of daily_rows whose card totals sum to a
+    tight match with the deposit amount. Handles processors that batch
+    multiple days into one deposit (e.g. Thu+Fri+Sat → Monday deposit).
+
+    daily_rows must be sorted oldest-first.
+    Returns list of (start_idx, end_idx_inclusive, sum) tuples.
+    """
+    matches: list[tuple[int, int, float]] = []
+    n = len(daily_rows)
+    for i in range(n):
+        running = 0.0
+        for j in range(i, n):
+            running += float(daily_rows[j].card)
+            if running > deposit + _CC_TOLERANCE_OVER:
+                break  # any further extension will only overshoot more
+            if _is_tight_match(deposit, running):
+                matches.append((i, j, round(running, 2)))
+    return matches
+
+
 async def check_cc_settlements(store_id: str) -> list[dict]:
     """
     Match NEW bank CC deposit transactions to DailySales.card totals.
-    Settlement usually arrives 1-5 business days after the sale day.
+    Settlement usually arrives 1-5 business days after the sale day, and
+    processors frequently batch multiple days into a single deposit (e.g.
+    Thu+Fri+Sat combined into a Monday deposit).
 
-    Algorithm (chronological, conservative — no greedy closest-amount):
+    Algorithm (chronological, conservative, supports multi-day batching):
       1. Process unmatched CC deposits oldest-first.
       2. Window per deposit: sale_date in [dep_date - 7, dep_date],
-         excluding already-settled days (cc_settled_at IS NOT NULL).
-      3. Tight match = deposit within [card - $1, card + $30].
+         excluding already-settled days (cc_settled_at IS NOT NULL),
+         sorted oldest-first.
+      3. Search for contiguous day ranges whose card-total sum tight-matches
+         the deposit. Tight match = sum within [deposit - $30, deposit + $1],
+         i.e. deposit up to $1 short or $30 over the sum.
       4. Decision:
-         - Exactly 1 tight match in window → auto-match that day.
-           If it's not the oldest unsettled day, include a warning about
-           the older skipped day(s) (likely fee hold) in the alert.
-         - Multiple tight matches (rare; two days with same card total)
-           → pick oldest, flag ambiguity in alert.
-         - Zero tight matches → mismatch alert against the OLDEST unsettled
-           day in the window (chronological, not closest amount). Day stays
-           unsettled until user taps [Resolve] or the real deposit arrives.
+         - Exactly 1 tight range → auto-settle every day in that range with
+           this deposit. If older days precede the range, warn about them
+           (likely fee hold / held batch).
+         - Multiple tight ranges → ambiguous. Do not auto-settle. Alert user
+           with range options so they can resolve manually.
+         - Zero tight ranges → real mismatch. Alert against the oldest
+           unsettled day. Day stays unsettled until resolved.
       5. On auto-match: write cc_settled_at = now() and cc_bank_txn_id on
-         the sale day, so it's never re-matched.
+         every day in the matched range.
       6. Deposits are marked is_matched=True after reporting (match or mismatch)
          so they don't re-alert.
 
@@ -784,7 +813,8 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
 
     Returns list of match/mismatch dicts with keys:
       bank_txn_id, bank_date, bank_amount, bank_desc, sale_date, sale_card,
-      diff, matched, ambiguous (bool), skipped_days (list[str])
+      diff, matched, ambiguous (bool), skipped_days (list[str]),
+      settled_days (list[str] — days included in the match)
     """
     import asyncio
     from datetime import datetime
@@ -828,40 +858,51 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
             if not daily_rows:
                 continue
 
-            # Find tight matches within the window
-            tight = [r for r in daily_rows if _is_tight_match(bank_amount, float(r.card))]
+            # Search for any contiguous range of days summing to a tight match
+            ranges = _find_tight_ranges(daily_rows, bank_amount)
 
-            if len(tight) == 1:
-                best = tight[0]
-                sale_card = float(best.card)
-                diff = round(bank_amount - sale_card, 2)
-                # Older unsettled days that got skipped (likely fee hold / held batches)
-                skipped = [str(r.sale_date) for r in daily_rows if r.sale_date < best.sale_date]
+            if len(ranges) == 1:
+                i, j, total = ranges[0]
+                matched_rows = daily_rows[i : j + 1]
+                diff = round(bank_amount - total, 2)
+                settled_days = [str(r.sale_date) for r in matched_rows]
+                # Days older than the match that were skipped (possible fee hold)
+                skipped = [str(r.sale_date) for r in daily_rows[:i]]
+
+                range_label = (
+                    settled_days[0] if len(settled_days) == 1
+                    else f"{settled_days[0]} → {settled_days[-1]} ({len(settled_days)} days)"
+                )
 
                 entry = {
                     "bank_txn_id":  dep.id,
                     "bank_date":    str(dep_date),
                     "bank_amount":  bank_amount,
                     "bank_desc":    dep.description,
-                    "sale_date":    str(best.sale_date),
-                    "sale_card":    sale_card,
+                    "sale_date":    range_label,
+                    "sale_card":    total,
                     "diff":         diff,
                     "matched":      True,
                     "ambiguous":    False,
                     "skipped_days": skipped,
+                    "settled_days": settled_days,
                 }
 
-                # Persist settlement on the daily_sales row
-                best.cc_settled_at = datetime.utcnow()
-                best.cc_bank_txn_id = dep.id
+                # Persist settlement on every matched row
+                now = datetime.utcnow()
+                for r in matched_rows:
+                    r.cc_settled_at = now
+                    r.cc_bank_txn_id = dep.id
 
                 try:
                     from tools.sheets_tools import mark_cc_settled
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, mark_cc_settled, best.sale_date, bank_amount, dep_date,
-                    )
-                    log.info("CC settled: bank $%.2f on %s → sale %s card $%.2f (diff $%.2f)%s",
-                             bank_amount, dep_date, best.sale_date, sale_card, diff,
+                    loop = asyncio.get_event_loop()
+                    for r in matched_rows:
+                        await loop.run_in_executor(
+                            None, mark_cc_settled, r.sale_date, float(r.card), dep_date,
+                        )
+                    log.info("CC settled: bank $%.2f on %s → %s total $%.2f (diff $%.2f)%s",
+                             bank_amount, dep_date, range_label, total, diff,
                              f" [skipped={skipped}]" if skipped else "")
                 except Exception as e:
                     log.warning("CC sheet highlight failed: %s", e)
@@ -869,44 +910,37 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
                 dep.is_matched = True
                 results.append(entry)
 
-            elif len(tight) > 1:
-                # Two or more days have the same card total within tolerance.
-                # Pick oldest and flag as ambiguous so the user can verify.
-                best = tight[0]  # daily_rows already ordered asc
-                sale_card = float(best.card)
-                diff = round(bank_amount - sale_card, 2)
-                skipped = [str(r.sale_date) for r in daily_rows if r.sale_date < best.sale_date]
+            elif len(ranges) > 1:
+                # Ambiguous: multiple ranges tight-match. Don't auto-settle —
+                # let the user resolve manually so we don't mark the wrong days.
+                # Report each range as an option.
+                options = []
+                for (i, j, total) in ranges:
+                    opt_days = [str(daily_rows[k].sale_date) for k in range(i, j + 1)]
+                    opt_label = opt_days[0] if len(opt_days) == 1 else f"{opt_days[0]} → {opt_days[-1]}"
+                    options.append({"label": opt_label, "days": opt_days, "total": total})
 
                 entry = {
                     "bank_txn_id":  dep.id,
                     "bank_date":    str(dep_date),
                     "bank_amount":  bank_amount,
                     "bank_desc":    dep.description,
-                    "sale_date":    str(best.sale_date),
-                    "sale_card":    sale_card,
-                    "diff":         diff,
-                    "matched":      True,
+                    "sale_date":    options[0]["label"],
+                    "sale_card":    options[0]["total"],
+                    "diff":         round(bank_amount - options[0]["total"], 2),
+                    "matched":      False,
                     "ambiguous":    True,
-                    "ambiguous_options": [str(r.sale_date) for r in tight],
-                    "skipped_days": skipped,
+                    "ambiguous_options": options,
+                    "skipped_days": [],
+                    "settled_days": [],
                 }
 
-                best.cc_settled_at = datetime.utcnow()
-                best.cc_bank_txn_id = dep.id
-
-                try:
-                    from tools.sheets_tools import mark_cc_settled
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, mark_cc_settled, best.sale_date, bank_amount, dep_date,
-                    )
-                except Exception as e:
-                    log.warning("CC sheet highlight failed: %s", e)
-
+                # Mark deposit notified — we told the user. They'll resolve manually.
                 dep.is_matched = True
                 results.append(entry)
 
             else:
-                # Zero tight matches → real mismatch. Report against oldest day.
+                # Zero tight ranges → real mismatch. Report against oldest day.
                 oldest = daily_rows[0]
                 sale_card = float(oldest.card)
                 diff = round(bank_amount - sale_card, 2)
@@ -922,6 +956,7 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
                     "matched":      False,
                     "ambiguous":    False,
                     "skipped_days": [],
+                    "settled_days": [],
                 }
 
                 # Mark deposit notified — we told the user, don't re-alert.
@@ -933,6 +968,91 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
         await session.commit()
 
     return results
+
+
+async def settle_cc_days_with_deposit(
+    store_id: str,
+    bank_txn_id: int,
+    sale_date_isos: list[str],
+) -> bool:
+    """
+    User picked which days this ambiguous deposit covers (via cc_pick button).
+    Mark every specified day as cc_settled_at now, link to the bank txn, and
+    highlight the sheet.
+    """
+    from datetime import datetime, date as _date
+    from sqlalchemy import select, and_
+    from db.database import get_async_session
+    from db.models import BankTransaction, DailySales
+
+    try:
+        sds = [_date.fromisoformat(d) for d in sale_date_isos]
+    except ValueError:
+        return False
+
+    async with get_async_session() as session:
+        dep = (await session.execute(
+            select(BankTransaction).where(and_(
+                BankTransaction.id == bank_txn_id,
+                BankTransaction.store_id == store_id,
+            ))
+        )).scalar_one_or_none()
+        if not dep:
+            return False
+
+        rows = (await session.execute(
+            select(DailySales).where(and_(
+                DailySales.store_id == store_id,
+                DailySales.sale_date.in_(sds),
+            ))
+        )).scalars().all()
+
+        if not rows:
+            return False
+
+        now = datetime.utcnow()
+        for r in rows:
+            r.cc_settled_at = now
+            r.cc_bank_txn_id = bank_txn_id
+        dep.is_matched = True
+        dep_date = dep.transaction_date
+        await session.commit()
+
+    # Highlight sheet for each day
+    try:
+        import asyncio
+        from tools.sheets_tools import mark_cc_settled
+        loop = asyncio.get_event_loop()
+        for r in rows:
+            await loop.run_in_executor(
+                None, mark_cc_settled, r.sale_date, float(r.card), dep_date,
+            )
+    except Exception as e:
+        log.warning("Sheet highlight after cc_pick failed: %s", e)
+
+    log.info("CC ambiguous resolved store=%s bank_txn=%s days=%s",
+             store_id, bank_txn_id, sale_date_isos)
+    return True
+
+
+async def skip_cc_deposit(store_id: str, bank_txn_id: int) -> bool:
+    """User tapped Skip on an ambiguous CC deposit alert. Just mark notified."""
+    from sqlalchemy import select, and_
+    from db.database import get_async_session
+    from db.models import BankTransaction
+
+    async with get_async_session() as session:
+        dep = (await session.execute(
+            select(BankTransaction).where(and_(
+                BankTransaction.id == bank_txn_id,
+                BankTransaction.store_id == store_id,
+            ))
+        )).scalar_one_or_none()
+        if not dep:
+            return False
+        dep.is_matched = True
+        await session.commit()
+    return True
 
 
 async def resolve_sale_day_cc(store_id: str, sale_date_iso: str) -> bool:
