@@ -1802,7 +1802,53 @@ _REVIEW_TYPES = [
     ("Rebate",         "rebate"),
     ("Payroll",        "payroll"),
     ("Skip / Fee",     "skip"),
+    ("✏️ Other (type)", "other"),
 ]
+
+
+def _get_subcat_options(rtype: str) -> list[str]:
+    """Return canonical subcategory options for a given reconcile type.
+
+    Sourced from tools/sheets_tools.py so the buttons always match the
+    columns in the Google Sheet. Returns [] for types that don't have
+    a fixed subcategory list.
+    """
+    try:
+        from tools.sheets_tools import (
+            EXPENSES_HEADERS,
+            REBATES_HEADERS,
+            PAYROLL_HEADERS,
+            COGS_VENDOR_COLS,
+        )
+    except ImportError:
+        return []
+    skip = {"DATE", "TOTAL"}
+    if rtype == "expense":
+        return [h for h in EXPENSES_HEADERS if h not in skip]
+    if rtype == "rebate":
+        return [h for h in REBATES_HEADERS if h not in skip]
+    if rtype == "payroll":
+        return [h for h in PAYROLL_HEADERS if h not in skip]
+    if rtype == "invoice":
+        return [h for h in COGS_VENDOR_COLS if h not in skip]
+    return []
+
+
+def _build_subcat_keyboard(rtype: str, txn_id: int) -> InlineKeyboardMarkup:
+    """Build a 2-column keyboard of subcategories for a reconcile type,
+    with a final 'Other (type)' row for free-text entry."""
+    options = _get_subcat_options(rtype)
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(options), 2):
+        pair = options[i : i + 2]
+        rows.append([
+            InlineKeyboardButton(opt, callback_data=f"bks:{rtype}:{idx}:{txn_id}")
+            for idx, opt in enumerate(pair, start=i)
+        ])
+    rows.append([
+        InlineKeyboardButton("✏️ Other (type)", callback_data=f"bko:{rtype}:{txn_id}")
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 async def _send_invoice_paid_alert(bot: Bot, inv: dict) -> None:
@@ -2255,6 +2301,46 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         return
 
+    # ── Subcategory button selected (bks:rtype:idx:txn_id) ────────────────────
+    if data.startswith("bks:"):
+        _, rtype, idx_str, txn_id_str = data.split(":", 3)
+        txn_id = int(txn_id_str)
+        idx = int(idx_str)
+        options = _get_subcat_options(rtype)
+        if not (0 <= idx < len(options)):
+            await query.edit_message_text("Invalid option. Please retry.", parse_mode=None)
+            return
+        subcat = options[idx]
+        from tools.bank_reconciler import confirm_transaction
+        await confirm_transaction(store_id, txn_id, rtype, subcat, sender="user")
+        await clear_state(store_id, f"bk_msg_{txn_id}")
+        await query.edit_message_text(
+            f"✅ Confirmed as {rtype}: {subcat}\n"
+            f"I'll remember this for similar transactions.",
+            parse_mode=None,
+        )
+        return
+
+    # ── User wants to type a custom subcategory (bko:rtype:txn_id) ────────────
+    if data.startswith("bko:"):
+        _, rtype, txn_id_str = data.split(":", 2)
+        txn_id = int(txn_id_str)
+        await save_state(store_id, f"bank_confirm_{txn_id}", {
+            "txn_id": txn_id,
+            "reconcile_type": rtype,
+        })
+        prompt_map = {
+            "invoice": "vendor name (e.g. McLane, Core-Mark)",
+            "expense":  "expense category (e.g. Rent, Insurance, Utilities)",
+            "rebate":   "rebate source",
+            "payroll":  "employee name",
+        }
+        await query.edit_message_text(
+            f"✏️ Type the {prompt_map.get(rtype, 'name')}:",
+            parse_mode=None,
+        )
+        return
+
     # ── Standard category selection ───────────────────────────────────────────
     parts = data.split(":")
     if len(parts) != 3 or parts[0] != "bk":
@@ -2264,23 +2350,30 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     txn_id = int(txn_id_str)
     store_id = settings.store_id
 
-    # For types that need a subcategory, prompt the user
+    # For known types that have fixed subcategory lists, show a button keyboard
     if reconcile_type in ("invoice", "expense", "rebate", "payroll"):
-        # Store pending confirmation in DB state so next plain-text triggers it
+        rtype_label = {
+            "invoice": "vendor",
+            "expense": "expense category",
+            "rebate":  "rebate source",
+            "payroll": "employee",
+        }[reconcile_type]
+        await query.edit_message_text(
+            f"Which {rtype_label}?",
+            reply_markup=_build_subcat_keyboard(reconcile_type, txn_id),
+            parse_mode=None,
+        )
+        return
+
+    # "Other" at top level — let user type whatever this transaction is
+    if reconcile_type == "other":
         await save_state(store_id, f"bank_confirm_{txn_id}", {
             "txn_id": txn_id,
-            "reconcile_type": reconcile_type,
+            "reconcile_type": "other",
         })
-
-        label_map = {
-            "invoice": "vendor name (e.g. McLane, Core-Mark)",
-            "expense":  "expense category (e.g. Rent, Insurance, Utilities)",
-            "rebate":   "vendor name (e.g. Altria, RJ Reynolds)",
-            "payroll":  "employee name",
-        }
         await query.edit_message_text(
-            f"✏️ What is the {label_map.get(reconcile_type, 'category')} for this transaction?\n"
-            f"Reply with a short name.",
+            "✏️ What kind of transaction is this? Type a short description "
+            "(e.g. 'loan repayment', 'tax refund', 'owner draw').",
             parse_mode=None,
         )
         return
@@ -2453,7 +2546,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("bank", cmd_bank))
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("token", cmd_token))
-    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^(bk|cc_resolve:|cc_pick:|cc_skip:)"))
+    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^(bk|bks:|bko:|cc_resolve:|cc_pick:|cc_skip:)"))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_invoice_photo))
