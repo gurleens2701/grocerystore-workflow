@@ -75,6 +75,11 @@ class DailySales(Base):
     total_payments: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     over_short: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
 
+    # CC settlement reconciliation — set when the day's card total is matched
+    # to a bank deposit (auto) or manually resolved by the user via Telegram.
+    cc_settled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cc_bank_txn_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     # Department breakdown JSON [{"name": "BEER", "sales": 123.45, "items": 10}, ...]
     departments: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
 

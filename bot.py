@@ -1958,9 +1958,16 @@ async def send_bank_auto_review(bot: Bot, txn: dict) -> None:
 
 
 async def send_cc_settlement_alert(bot: Bot, settlement: dict) -> None:
-    """Notify owner of a CC settlement match or mismatch."""
+    """Notify owner of a CC settlement match or mismatch.
+
+    Matches are info-only. Mismatches include a [Resolve] button the user can
+    tap to mark the sale day as manually reconciled (e.g. for a monthly fee hold).
+    """
     diff = settlement["diff"]
     matched = settlement.get("matched", False)
+    skipped_days = settlement.get("skipped_days") or []
+    ambiguous = settlement.get("ambiguous", False)
+    reply_markup = None
 
     if matched:
         text = (
@@ -1972,20 +1979,53 @@ async def send_cc_settlement_alert(bot: Bot, settlement: dict) -> None:
         if abs(diff) > 0.01:
             text += f"  Diff: ${abs(diff):,.2f}\n"
         text += f"  Sheet CREDIT cell highlighted green."
+
+        if ambiguous:
+            opts = ", ".join(settlement.get("ambiguous_options") or [])
+            text += f"\n\n⚠️ Ambiguous: multiple days had the same total ({opts}). Verify manually if needed."
+
+        if skipped_days:
+            days_str = ", ".join(skipped_days)
+            text += (
+                f"\n\n⚠️ Older unsettled day(s) skipped: *{days_str}*\n"
+                f"Likely fee hold or held batch. Tap Resolve on those alerts "
+                f"once you've confirmed with the processor."
+            )
+            buttons = [
+                [InlineKeyboardButton(f"Resolve {d}", callback_data=f"cc_resolve:{d}")]
+                for d in skipped_days
+            ]
+            reply_markup = InlineKeyboardMarkup(buttons)
     else:
         diff_str = f"+${diff:,.2f} (bank over)" if diff > 0 else f"-${abs(diff):,.2f} (short)"
         text = (
             f"⚠️ *CC Settlement Mismatch*\n"
             f"{'─'*32}\n"
             f"  Bank deposit: ${settlement['bank_amount']:,.2f} on {settlement['bank_date']}\n"
-            f"  Closest match: {settlement['sale_date']} card ${settlement['sale_card']:,.2f}\n"
+            f"  Oldest unsettled day: {settlement['sale_date']} card ${settlement['sale_card']:,.2f}\n"
             f"  Difference: {diff_str}\n\n"
-            f"Check your dashboard: clerkai.live/bank"
         )
+        if diff < -1.00:
+            text += "This is a real shortage — call the credit card processor.\n\n"
+        else:
+            text += (
+                "Could be a monthly fee hold or timing issue. If you've confirmed "
+                f"the {settlement['sale_date']} day is handled, tap Resolve to stop alerts.\n\n"
+            )
+        text += "Dashboard: clerkai.live/bank"
+
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                f"✓ Resolve {settlement['sale_date']}",
+                callback_data=f"cc_resolve:{settlement['sale_date']}",
+            )
+        ]])
+
     await bot.send_message(
         chat_id=settings.telegram_chat_id,
         text=text,
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=reply_markup,
     )
 
 
@@ -2072,6 +2112,23 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     data     = query.data
     store_id = settings.store_id
+
+    # ── CC settlement manual resolve ──────────────────────────────────────────
+    if data.startswith("cc_resolve:"):
+        sale_date_iso = data.split(":", 1)[1]
+        from tools.bank_reconciler import resolve_sale_day_cc
+        ok = await resolve_sale_day_cc(store_id, sale_date_iso)
+        if ok:
+            await query.edit_message_text(
+                f"✓ Marked {sale_date_iso} as CC-resolved. No more alerts for this day.",
+                parse_mode=None,
+            )
+        else:
+            await query.edit_message_text(
+                f"Couldn't find sale day {sale_date_iso}.",
+                parse_mode=None,
+            )
+        return
 
     # ── Check-match Yes / No ──────────────────────────────────────────────────
     if data.startswith("bk_yes:") or data.startswith("bk_no:"):
@@ -2338,7 +2395,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("bank", cmd_bank))
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("token", cmd_token))
-    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^bk"))
+    app.add_handler(CallbackQueryHandler(handle_bank_callback, pattern=r"^(bk|cc_resolve:)"))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_invoice_photo))
