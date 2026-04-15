@@ -61,6 +61,7 @@ async def run_bot() -> None:
         id="nightly_sync",
         name="Nightly Sheets → PostgreSQL Sync",
         replace_existing=True,
+        misfire_grace_time=600,
     )
 
     # Bank sync every 4 hours — pull new transactions and notify via Telegram
@@ -86,6 +87,7 @@ async def run_bot() -> None:
         id="bank_sync",
         name="Bank Transaction Sync (every 4h)",
         replace_existing=True,
+        misfire_grace_time=600,
     )
 
     # Weekly bank summary — every Sunday at 6 PM

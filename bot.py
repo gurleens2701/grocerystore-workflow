@@ -2164,7 +2164,7 @@ async def _send_stale_review_reminder(bot: Bot) -> None:
             .where(
                 BankTransaction.store_id == settings.store_id,
                 BankTransaction.review_status == "needs_review",
-                BankTransaction.date <= str(cutoff),
+                BankTransaction.transaction_date <= cutoff,
             )
         )
         stale_count = result.scalar() or 0

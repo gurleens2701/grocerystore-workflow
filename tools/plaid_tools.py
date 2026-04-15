@@ -324,7 +324,7 @@ async def match_transactions(store_id: str) -> dict:
                     Invoice.invoice_date.between(date_lo, date_hi),
                     Invoice.amount.between(amt_lo, amt_hi),
                 ))
-            )).scalar_one_or_none()
+            )).scalars().first()
 
             if invoice:
                 bt.matched_invoice_id = invoice.id
@@ -357,7 +357,7 @@ async def match_transactions(store_id: str) -> dict:
                     Expense.expense_date.between(date_lo, date_hi),
                     Expense.amount.between(amt_lo, amt_hi),
                 ))
-            )).scalar_one_or_none()
+            )).scalars().first()
 
             if expense:
                 bt.is_matched = True
