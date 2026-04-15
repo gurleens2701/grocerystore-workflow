@@ -64,10 +64,14 @@ async def _get_creds(store_id: str) -> dict | None:
 
 
 async def _save_creds(store_id: str, access_token: str, item_id: str, cursor: str | None = None) -> None:
+    # Preserve connected_at across re-saves so we don't lose the onboarding cutoff
+    existing = await get_state(store_id, _STATE_KEY) or {}
+    connected_at = existing.get("connected_at") or date.today().isoformat()
     await save_state(store_id, _STATE_KEY, {
         "access_token": access_token,
         "item_id":      item_id,
         "cursor":       cursor,
+        "connected_at": connected_at,
     })
 
 
@@ -221,6 +225,8 @@ async def sync_transactions(store_id: str) -> dict:
 
     access_token = creds["access_token"]
     cursor       = creds.get("cursor")
+    connected_at_str = creds.get("connected_at")
+    cutoff = date.fromisoformat(connected_at_str) if connected_at_str else None
 
     raw_txns, next_cursor = await asyncio.get_event_loop().run_in_executor(
         None, _sync_plaid_blocking, access_token, cursor
@@ -230,6 +236,10 @@ async def sync_transactions(store_id: str) -> dict:
     async with get_async_session() as session:
         for t in raw_txns:
             if t["pending"]:
+                continue
+            # Skip transactions older than onboarding date — we only care
+            # about activity from the day the user connected onwards.
+            if cutoff and date.fromisoformat(t["date"]) < cutoff:
                 continue
             stmt = pg_insert(BankTransaction).values(
                 store_id=store_id,
