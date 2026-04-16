@@ -719,6 +719,89 @@ async def scheduled_daily(app: Application) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-store scheduler entry points — called by DB-driven scheduler in main.py
+# Each job is registered once per store; these handle exactly one store.
+# ---------------------------------------------------------------------------
+
+async def scheduled_daily_for_store(store_id: str, app: Application) -> None:
+    """
+    Daily fetch for a single store. Called by the DB-driven scheduler.
+
+    Replaces the loop inside scheduled_daily() for multi-store setups.
+    If the store profile is missing or daily_report is disabled, logs and returns.
+    """
+    from config.store_registry import load_store as _load
+    store = await _load(store_id=store_id)
+    if not store:
+        log.warning("scheduled_daily_for_store: store_id=%s not found in platform.stores", store_id)
+        return
+    if not store.workflows.daily_report_enabled:
+        log.info("store=%s daily_report disabled — skipping", store_id)
+        return
+
+    try:
+        if store.workflows.daily_report_mode == "manual_entry":
+            await _do_manual_daily_prompt(app.bot, store.chat_id)
+            log.info("store=%s manual daily prompt sent", store_id)
+        else:
+            ok = await _do_daily_fetch(app.bot, store.chat_id)
+            if ok:
+                log.info("store=%s daily fetch done — waiting for right-side input", store_id)
+    except Exception as e:
+        log.warning("store=%s scheduled_daily_for_store failed: %s", store_id, e, exc_info=True)
+
+
+async def bank_sync_for_store(store_id: str, app: Application) -> None:
+    """
+    Bank sync for a single store. Called by the DB-driven scheduler.
+
+    Skips silently if Plaid is not connected for this store.
+    """
+    from config.store_registry import load_store as _load
+    from tools.plaid_tools import is_connected, sync_transactions, fetch_accounts
+
+    store = await _load(store_id=store_id)
+    if not store:
+        log.warning("bank_sync_for_store: store_id=%s not found", store_id)
+        return
+    if not store.workflows.bank_recon_enabled:
+        log.debug("store=%s bank_recon disabled — skipping", store_id)
+        return
+
+    try:
+        if not await is_connected(store_id):
+            return
+        result = await sync_transactions(store_id)
+        added = result.get("added", 0)
+        needs = len(result.get("needs_review", []))
+        autos = len(result.get("auto_list", []))
+        if added or needs or autos:
+            await notify_bank_sync_results(result, app.bot)
+            log.info("store=%s bank sync: added=%d review=%d auto=%d", store_id, added, needs, autos)
+        else:
+            log.info("store=%s bank sync: no new transactions", store_id)
+
+        # Negative balance alert
+        try:
+            for acct in await fetch_accounts(store_id):
+                balance = acct.get("available") if acct.get("available") is not None else acct.get("current", 0)
+                if balance < 0:
+                    await app.bot.send_message(
+                        chat_id=store.chat_id,
+                        text=(
+                            f"🚨 *Negative Bank Balance*\n"
+                            f"{acct['name']}: *${balance:,.2f}*\n\n"
+                            "Check your account — you may have overdraft fees coming."
+                        ),
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+        except Exception as e:
+            log.warning("store=%s balance check failed: %s", store_id, e)
+    except Exception as e:
+        log.warning("store=%s bank_sync_for_store failed: %s", store_id, e, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Invoice / COGS handlers
 # ---------------------------------------------------------------------------
 
