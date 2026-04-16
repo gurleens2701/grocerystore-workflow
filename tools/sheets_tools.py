@@ -27,6 +27,7 @@ Each tab layout (rows are 1-indexed):
   Rows 108+    : Revenue entries
 """
 
+import asyncio
 import calendar
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -441,6 +442,44 @@ def cleanup_old_tabs(spreadsheet: gspread.Spreadsheet) -> None:
 # ---------------------------------------------------------------------------
 # Daily sales logging
 # ---------------------------------------------------------------------------
+
+def get_daily_sheet_column(store_id: str, field_name: str) -> int | None:
+    """
+    Look up the 1-based column index for a field in the 'daily_sales' section
+    from platform.store_sheet_mappings. Returns None if not found.
+    Fix point: if a value writes to the wrong column, the mapping row in the DB is the bug.
+    """
+    try:
+        import asyncio as _asyncio
+        from sqlalchemy import select
+        from db.database import get_async_session
+        from db.models import StoreSheetMapping
+
+        async def _query():
+            async with get_async_session() as session:
+                row = (await session.execute(
+                    select(StoreSheetMapping).where(
+                        StoreSheetMapping.store_id == store_id,
+                        StoreSheetMapping.section == "daily_sales",
+                        StoreSheetMapping.field_name == field_name,
+                    )
+                )).scalars().first()
+                return row.column_index if row else None
+
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            # Called from async context — run in executor to avoid nesting
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_asyncio.run, _query())
+                return future.result(timeout=5)
+        else:
+            return loop.run_until_complete(_query())
+    except Exception as _e:
+        import logging
+        logging.getLogger(__name__).debug("get_daily_sheet_column failed for %s: %s", field_name, _e)
+        return None
+
 
 def log_daily_sales(sales_data: dict[str, Any]) -> str:
     target_date = date.fromisoformat(sales_data.get("date", str(date.today())))

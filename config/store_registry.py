@@ -48,6 +48,25 @@ class SchedulerPolicy:
 
 
 @dataclass
+class DailyReportRule:
+    """One field on the daily sheet. source='api' → from NRS; 'manual' → owner types it."""
+    field_name: str
+    label: str
+    source: str                               # api | manual
+    section: str                              # left | right
+    display_order: int
+
+
+@dataclass
+class SheetMapping:
+    """Maps a field_name to a 1-based column_index in a Google Sheet section."""
+    section: str
+    field_name: str
+    column_index: int
+    column_header: str
+
+
+@dataclass
 class StoreProfile:
     store_id: str
     store_name: str
@@ -56,11 +75,28 @@ class StoreProfile:
     timezone: str
     workflows: WorkflowFlags = field(default_factory=WorkflowFlags)
     scheduler_policies: list[SchedulerPolicy] = field(default_factory=list)
+    daily_report_rules: list[DailyReportRule] = field(default_factory=list)
+    sheet_mappings: list[SheetMapping] = field(default_factory=list)
+    enabled_tools: set[str] = field(default_factory=set)
 
     def get_scheduler_policy(self, job_name: str) -> SchedulerPolicy | None:
         for p in self.scheduler_policies:
             if p.job_name == job_name:
                 return p
+        return None
+
+    def get_manual_rules(self) -> list[DailyReportRule]:
+        """Returns right-side fields the owner must enter, sorted by display_order."""
+        return sorted(
+            [r for r in self.daily_report_rules if r.source == "manual"],
+            key=lambda r: r.display_order,
+        )
+
+    def get_sheet_column(self, section: str, field_name: str) -> int | None:
+        """Returns 1-based column index for a field in the given sheet section."""
+        for m in self.sheet_mappings:
+            if m.section == section and m.field_name == field_name:
+                return m.column_index
         return None
 
 
@@ -69,9 +105,12 @@ class StoreProfile:
 # ---------------------------------------------------------------------------
 
 async def _load_profile_from_db(store_row) -> StoreProfile:
-    """Build a StoreProfile from a platform.stores row + related rows."""
+    """Build a StoreProfile from a platform.stores row + all related config rows."""
     from db.database import get_async_session
-    from db.models import StoreWorkflow, StoreSchedulerPolicy
+    from db.models import (
+        StoreWorkflow, StoreSchedulerPolicy,
+        StoreDailyReportRule, StoreSheetMapping, StoreToolPolicy,
+    )
 
     store_id = store_row.store_id
 
@@ -82,6 +121,20 @@ async def _load_profile_from_db(store_row) -> StoreProfile:
 
         policy_rows = (await session.execute(
             select(StoreSchedulerPolicy).where(StoreSchedulerPolicy.store_id == store_id)
+        )).scalars().all()
+
+        rule_rows = (await session.execute(
+            select(StoreDailyReportRule)
+            .where(StoreDailyReportRule.store_id == store_id)
+            .order_by(StoreDailyReportRule.display_order)
+        )).scalars().all()
+
+        mapping_rows = (await session.execute(
+            select(StoreSheetMapping).where(StoreSheetMapping.store_id == store_id)
+        )).scalars().all()
+
+        tool_rows = (await session.execute(
+            select(StoreToolPolicy).where(StoreToolPolicy.store_id == store_id)
         )).scalars().all()
 
     workflows = WorkflowFlags()
@@ -99,14 +152,24 @@ async def _load_profile_from_db(store_row) -> StoreProfile:
         )
 
     policies = [
-        SchedulerPolicy(
-            job_name=p.job_name,
-            schedule=p.schedule,
-            enabled=p.enabled,
-            config=p.config or {},
-        )
+        SchedulerPolicy(job_name=p.job_name, schedule=p.schedule,
+                        enabled=p.enabled, config=p.config or {})
         for p in policy_rows
     ]
+
+    report_rules = [
+        DailyReportRule(field_name=r.field_name, label=r.label, source=r.source,
+                        section=r.section, display_order=r.display_order)
+        for r in rule_rows
+    ]
+
+    mappings = [
+        SheetMapping(section=m.section, field_name=m.field_name,
+                     column_index=m.column_index, column_header=m.column_header)
+        for m in mapping_rows
+    ]
+
+    enabled_tools = {t.tool_name for t in tool_rows if t.enabled}
 
     return StoreProfile(
         store_id=store_id,
@@ -116,6 +179,9 @@ async def _load_profile_from_db(store_row) -> StoreProfile:
         timezone=store_row.timezone,
         workflows=workflows,
         scheduler_policies=policies,
+        daily_report_rules=report_rules,
+        sheet_mappings=mappings,
+        enabled_tools=enabled_tools,
     )
 
 

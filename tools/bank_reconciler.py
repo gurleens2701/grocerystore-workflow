@@ -109,15 +109,15 @@ async def _lookup_rule(store_id: str, description: str) -> dict | None:
         if pattern in desc_lower:
             return {"reconcile_type": rtype, "reconcile_subcategory": subcat, "confidence": 1.0}
 
-    # 2. DB learned rules
-    from sqlalchemy import select, and_
+    # 2. DB learned rules — reads from platform.store_bank_rules
+    from sqlalchemy import select
     from db.database import get_async_session
-    from db.models import TransactionRule
+    from db.models import StoreBankRule
 
     async with get_async_session() as session:
         rules = (await session.execute(
-            select(TransactionRule).where(TransactionRule.store_id == store_id)
-            .order_by(TransactionRule.confirmed_count.desc())
+            select(StoreBankRule).where(StoreBankRule.store_id == store_id)
+            .order_by(StoreBankRule.confirmed_count.desc())
         )).scalars().all()
 
     for rule in rules:
@@ -413,14 +413,16 @@ def _txn_to_dict(txn: Any, confidence: float = 0.0, ai_guess: str = "") -> dict:
 async def _upsert_rule(store_id: str, description: str, reconcile_type: str, subcategory: str | None,
                        confirmed: bool = True, session=None) -> None:
     """
-    Extract a canonical pattern from the description (first 6 words, lowercased),
-    then upsert into transaction_rules.
+    Extract a canonical pattern from the description (first 5 significant words, lowercased),
+    then upsert into platform.store_bank_rules.
+    Fix point: if a transaction keeps asking for review, check platform.store_bank_rules
+    for a matching pattern — either it's missing or the reconcile_type is wrong.
     """
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from db.database import get_async_session
-    from db.models import TransactionRule
+    from db.models import StoreBankRule
 
-    # Normalize: strip numbers/dates, take first 4-5 significant words
+    # Normalize: strip numbers/dates, take first 5 significant words
     words = re.sub(r"[0-9#\-/*]+", " ", description.lower()).split()
     words = [w for w in words if len(w) > 2][:5]
     if not words:
@@ -428,7 +430,7 @@ async def _upsert_rule(store_id: str, description: str, reconcile_type: str, sub
     pattern = " ".join(words)
 
     async def _do(s):
-        stmt = pg_insert(TransactionRule).values(
+        stmt = pg_insert(StoreBankRule).values(
             store_id=store_id,
             pattern=pattern,
             reconcile_type=reconcile_type,
@@ -439,7 +441,7 @@ async def _upsert_rule(store_id: str, description: str, reconcile_type: str, sub
             set_={
                 "reconcile_type": reconcile_type,
                 "reconcile_subcategory": subcategory,
-                "confirmed_count": TransactionRule.confirmed_count + (1 if confirmed else 0),
+                "confirmed_count": StoreBankRule.confirmed_count + (1 if confirmed else 0),
                 "last_seen_at": date.today(),
             },
         )

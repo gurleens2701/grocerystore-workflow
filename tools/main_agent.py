@@ -10,8 +10,11 @@ Entry point: run_agent(question, store_id) — blocking, safe to call via run_in
 
 import asyncio
 import json
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
+
+log = logging.getLogger(__name__)
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -775,6 +778,42 @@ Today is {today}. Store: {store_name}.{owner_line}\
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _build_tool_list(store_id: str) -> list:
+    """
+    Return the enabled tool list for a store by querying platform.store_tool_policies.
+    Falls back to _ALL_TOOLS if the table isn't seeded yet (pre-migration or new store).
+    Fix point: if owner says 'bot can't log expenses', check platform.store_tool_policies
+    for that store — the tool_name row must exist and have enabled=true.
+    """
+    try:
+        import asyncio as _aio
+        from sqlalchemy import select
+        from db.database import get_async_session
+        from db.models import StoreToolPolicy
+
+        async def _query():
+            async with get_async_session() as session:
+                rows = (await session.execute(
+                    select(StoreToolPolicy).where(
+                        StoreToolPolicy.store_id == store_id,
+                        StoreToolPolicy.enabled == True,
+                    )
+                )).scalars().all()
+                return {r.tool_name for r in rows}
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            enabled = pool.submit(_aio.run, _query()).result(timeout=5)
+
+        if not enabled:
+            return _ALL_TOOLS  # fallback: nothing in DB yet
+
+        return [t for t in _ALL_TOOLS if t.name in enabled]
+    except Exception as _e:
+        log.warning("_build_tool_list failed for store=%s: %s — using all tools", store_id, _e)
+        return _ALL_TOOLS
+
+
 def run_agent(question: str, store_id: str, owner_name: str = "",
               history: list[dict] | None = None) -> str:
     """
@@ -782,13 +821,13 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
     Blocking — call via run_in_executor from async context.
 
     history: list of {"role": "user"|"assistant", "content": str} — recent conversation.
-    store_id is accepted for future multi-store support; currently settings.store_id
-    is used inside individual tools (they read from settings directly).
+    Tool list is loaded per-store from platform.store_tool_policies.
     """
+    tools = _build_tool_list(store_id)
     llm = ChatAnthropic(
         model="claude-sonnet-4-6",
         api_key=settings.anthropic_api_key,
-    ).bind_tools(_ALL_TOOLS)
+    ).bind_tools(tools)
 
     owner_line = f" The owner's name is {owner_name} — use their name occasionally to be friendly." if owner_name else ""
 

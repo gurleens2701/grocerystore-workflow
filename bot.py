@@ -180,17 +180,20 @@ def _fmt_left(sales: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _prompt_for_right_side() -> str:
+def _prompt_for_right_side(manual_rules=None) -> str:
+    """
+    Build the 'please enter these numbers' prompt.
+    If manual_rules (list of DailyReportRule) are provided, uses labels from DB.
+    Falls back to Moraine hardcoded values when rules not yet loaded.
+    """
+    if manual_rules:
+        lines = "\n".join(f"{r.label}:   " for r in manual_rules)
+    else:
+        lines = "IN. LOTTO:   \nON. LINE:    \nLOTTO PO:    \nLOTTO CR:    \nFOOD STAMP:  "
     return (
         "\n\n📋 *Please reply with these numbers:*\n"
         "_(Enter 0 if none)_\n\n"
-        "```\n"
-        "IN. LOTTO:   \n"
-        "ON. LINE:    \n"
-        "LOTTO PO:    \n"
-        "LOTTO CR:    \n"
-        "FOOD STAMP:  \n"
-        "```"
+        f"```\n{lines}\n```"
     )
 
 
@@ -362,14 +365,11 @@ def _build_preview(sales: dict) -> str:
     return _build_complete_sheet(sales, right)
 
 
-def _parse_right_side(text: str) -> dict[str, float] | None:
+def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
     """
-    Parse user's right-side input for the 5 manual fields.
-    Accepts formats like:
-      IN. LOTTO: 208
-      lotto po: 132
-      food stamp: 0
-    Or a plain list of 5 numbers (in order: lotto_in, lotto_online, lotto_po, lotto_cr, food_stamp).
+    Parse user's right-side input.
+    If manual_rules (list of DailyReportRule) are provided, builds keys_map from DB labels.
+    Falls back to Moraine hardcoded aliases when rules not loaded.
     Returns None if parsing fails.
     """
     def to_float(s: str) -> float:
@@ -378,13 +378,21 @@ def _parse_right_side(text: str) -> dict[str, float] | None:
         except ValueError:
             return 0.0
 
-    keys_map = {
-        "lotto_in":     ["in. lotto", "in lotto", "instant lotto", "instant lottery", "in.lotto"],
-        "lotto_online": ["on. line", "on line", "online lotto", "online lottery", "online"],
-        "lotto_po":     ["lotto po", "lotto p.o", "lottopo", "lotto payout", "payout"],
-        "lotto_cr":     ["lotto cr", "lottocr", "lotto credit", "lotto cr."],
-        "food_stamp":   ["food stamp", "foodstamp", "ebt", "food stamps", "snap"],
-    }
+    if manual_rules:
+        # Build keys_map from DB: field_name → [label_lower, field_name with spaces]
+        keys_map: dict[str, list[str]] = {}
+        for r in manual_rules:
+            aliases = [r.label.lower(), r.field_name.replace("_", " ")]
+            keys_map[r.field_name] = aliases
+    else:
+        # Hardcoded fallback (Moraine defaults)
+        keys_map = {
+            "lotto_in":     ["in. lotto", "in lotto", "instant lotto", "instant lottery", "in.lotto"],
+            "lotto_online": ["on. line", "on line", "online lotto", "online lottery", "online"],
+            "lotto_po":     ["lotto po", "lotto p.o", "lottopo", "lotto payout", "payout"],
+            "lotto_cr":     ["lotto cr", "lottocr", "lotto credit", "lotto cr."],
+            "food_stamp":   ["food stamp", "foodstamp", "ebt", "food stamps", "snap"],
+        }
 
     result: dict[str, float] = {}
     text_lower = text.lower()
@@ -397,14 +405,17 @@ def _parse_right_side(text: str) -> dict[str, float] | None:
                 result[key] = to_float(m.group(1))
                 break
 
-    # If no key matched at all, try plain number list (5 or 3 numbers)
+    # If no key matched, try plain number list matching the rule count
     if not result:
         nums = re.findall(r"\d+\.?\d*", text)
-        if len(nums) == 5:
+        n_rules = len(manual_rules) if manual_rules else 0
+        field_order = [r.field_name for r in manual_rules] if manual_rules else []
+        if n_rules and len(nums) == n_rules:
+            result = {k: to_float(v) for k, v in zip(field_order, nums)}
+        elif len(nums) == 5:
             order = ["lotto_in", "lotto_online", "lotto_po", "lotto_cr", "food_stamp"]
             result = {k: to_float(v) for k, v in zip(order, nums)}
         elif len(nums) == 3:
-            # Legacy: just the 3 original fields
             order = ["lotto_po", "lotto_cr", "food_stamp"]
             result = {k: to_float(v) for k, v in zip(order, nums)}
         else:
@@ -479,7 +490,16 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
         sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales, target_date)
         await save_state(settings.store_id, _STATE_SALES, sales)
 
-        msg = _fmt_left(sales) + _prompt_for_right_side()
+        # Load manual rules from DB — determines what labels to show in the prompt
+        manual_rules = None
+        try:
+            store = await load_store(chat_id=str(chat_id))
+            if store:
+                manual_rules = store.get_manual_rules()
+        except Exception as _e:
+            log.warning("Could not load store rules for daily prompt: %s", _e)
+
+        msg = _fmt_left(sales) + _prompt_for_right_side(manual_rules)
         await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
         asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", msg))
 
@@ -556,11 +576,24 @@ async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ConversationHandler.END
 
-    right = _parse_right_side(text)
+    # Load store rules for the parser so it knows which manual fields to expect
+    manual_rules = None
+    try:
+        store = await load_store(chat_id=str(update.effective_chat.id))
+        if store:
+            manual_rules = store.get_manual_rules()
+    except Exception as _e:
+        log.warning("Could not load rules for right-side parse: %s", _e)
+
+    right = _parse_right_side(text, manual_rules)
     if right is None:
+        # Build hint from rules if available, else hardcoded
+        if manual_rules:
+            hint = "\n".join(f"{r.label}: 0" for r in manual_rules)
+        else:
+            hint = "IN. LOTTO: 208\nON. LINE: 4\nLOTTO PO: 39\nLOTTO CR: 0\nFOOD STAMP: 0"
         await update.message.reply_text(
-            "⚠️ Could not parse numbers. Please use format:\n"
-            "IN. LOTTO: 208\nON. LINE: 4\nLOTTO PO: 39\nLOTTO CR: 0\nFOOD STAMP: 0",
+            f"⚠️ Could not parse numbers. Please use format:\n{hint}",
             parse_mode=None,
         )
         return AWAITING_RIGHT_SIDE  # stay in state, ask again

@@ -414,3 +414,60 @@ class AuditLog(Base):
     old_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     new_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class StoreDailyReportRule(Base):
+    """One row per field on the daily sheet. source='api' = NRS fills it; 'manual' = owner enters it.
+    Fix point: if Moraine's daily sheet loses a field, check this table first."""
+    __tablename__ = "store_daily_report_rules"
+    __table_args__ = (UniqueConstraint("store_id", "field_name"), {"schema": "platform"})
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), ForeignKey("platform.stores.store_id"), nullable=False)
+    section: Mapped[str] = mapped_column(String(8), nullable=False)       # left | right
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False)   # canonical key
+    label: Mapped[str] = mapped_column(String(64), nullable=False)        # display label
+    source: Mapped[str] = mapped_column(String(8), nullable=False)        # api | manual
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class StoreSheetMapping(Base):
+    """Maps field_name → column_index in Google Sheet per section.
+    Fix point: if a value writes to the wrong column, the bug lives here."""
+    __tablename__ = "store_sheet_mappings"
+    __table_args__ = (UniqueConstraint("store_id", "section", "field_name"), {"schema": "platform"})
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), ForeignKey("platform.stores.store_id"), nullable=False)
+    section: Mapped[str] = mapped_column(String(32), nullable=False)      # daily_sales | expenses | cogs | payroll
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False)   # canonical key or dept.key
+    column_index: Mapped[int] = mapped_column(Integer, nullable=False)    # 1-based
+    column_header: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class StoreToolPolicy(Base):
+    """Which agent tools are available per store.
+    Fix point: if owner says 'bot can't log expenses', check if tool row is enabled=true."""
+    __tablename__ = "store_tool_policies"
+    __table_args__ = (UniqueConstraint("store_id", "tool_name"), {"schema": "platform"})
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), ForeignKey("platform.stores.store_id"), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+
+
+class StoreBankRule(Base):
+    """Auto-categorization patterns for bank transactions.
+    Fix point: if a transaction keeps asking for review, check for a matching pattern here."""
+    __tablename__ = "store_bank_rules"
+    __table_args__ = (UniqueConstraint("store_id", "pattern"), {"schema": "platform"})
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), ForeignKey("platform.stores.store_id"), nullable=False)
+    pattern: Mapped[str] = mapped_column(String(256), nullable=False)
+    reconcile_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    reconcile_subcategory: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    confirmed_count: Mapped[int] = mapped_column(Integer, server_default=text("1"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
