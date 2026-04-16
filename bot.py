@@ -39,6 +39,7 @@ def get_bot() -> Bot | None:
     return _bot_instance
 
 from config.settings import settings
+from config.store_registry import load_store, load_all_active_stores
 from db.ops import log_message, save_daily_sales, save_expense, save_invoice, save_invoice_items, save_rebate, save_revenue, save_vendor_price
 from db.state import clear_state, get_state, save_state
 from tools.intent_router import classify_message
@@ -592,46 +593,57 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ---------------------------------------------------------------------------
 
 async def scheduled_daily(app: Application) -> None:
-    """Called by the scheduler at 7 AM. Fetches data (NRS) or prompts for photo (manual)."""
+    """Called by the scheduler at 7 AM. Runs for every active store in platform.stores."""
     bot = app.bot
-    profile = await get_user_profile(settings.store_id)
-    if profile.get("backoffice") == "manual":
-        await _do_manual_daily_prompt(bot, settings.telegram_chat_id)
-        log.info("Scheduled daily prompt sent (manual mode) — waiting for report photo.")
-    else:
-        ok = await _do_daily_fetch(bot, settings.telegram_chat_id)
-        if ok:
-            log.info("Scheduled daily fetch complete — waiting for right-side input via Telegram.")
-
-    # Bank sync + reconcile (if connected)
     from tools.plaid_tools import is_connected, sync_transactions, fetch_accounts
-    try:
-        if await is_connected(settings.store_id):
-            result = await sync_transactions(settings.store_id)
-            await notify_bank_sync_results(result, bot)
 
-            # ── Negative balance alert ────────────────────────────────────
-            try:
-                accounts = await fetch_accounts(settings.store_id)
-                for acct in accounts:
-                    balance = acct.get("available") if acct.get("available") is not None else acct.get("current", 0)
-                    if balance < 0:
-                        await bot.send_message(
-                            chat_id=settings.telegram_chat_id,
-                            text=(
-                                f"🚨 *Negative Bank Balance*\n"
-                                f"{acct['name']}: *${balance:,.2f}*\n\n"
-                                "Check your account — you may have overdraft fees coming."
-                            ),
-                            parse_mode=ParseMode.MARKDOWN,
-                        )
-            except Exception as e:
-                log.warning("Balance check failed: %s", e)
+    stores = await load_all_active_stores()
+    if not stores:
+        # Fallback to settings if platform.stores not yet seeded (pre-migration)
+        stores_chat_ids = [(settings.store_id, settings.telegram_chat_id)]
+    else:
+        stores_chat_ids = [(s.store_id, s.chat_id) for s in stores]
 
-    except Exception as e:
-        log.warning("Scheduled bank sync failed: %s", e)
+    for store_id, chat_id in stores_chat_ids:
+        try:
+            profile = await get_user_profile(store_id)
+            if profile.get("backoffice") == "manual":
+                await _do_manual_daily_prompt(bot, chat_id)
+                log.info("store=%s daily prompt sent (manual mode)", store_id)
+            else:
+                ok = await _do_daily_fetch(bot, chat_id)
+                if ok:
+                    log.info("store=%s daily fetch complete — waiting for right-side input", store_id)
+        except Exception as e:
+            log.warning("store=%s daily fetch failed: %s", store_id, e)
 
-    # ── Stale review reminder (transactions needing review > 2 days old) ──
+        # Bank sync + reconcile (if connected)
+        try:
+            if await is_connected(store_id):
+                result = await sync_transactions(store_id)
+                await notify_bank_sync_results(result, bot)
+
+                # ── Negative balance alert ────────────────────────────────
+                try:
+                    accounts = await fetch_accounts(store_id)
+                    for acct in accounts:
+                        balance = acct.get("available") if acct.get("available") is not None else acct.get("current", 0)
+                        if balance < 0:
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"🚨 *Negative Bank Balance*\n"
+                                    f"{acct['name']}: *${balance:,.2f}*\n\n"
+                                    "Check your account — you may have overdraft fees coming."
+                                ),
+                                parse_mode=ParseMode.MARKDOWN,
+                            )
+                except Exception as e:
+                    log.warning("store=%s balance check failed: %s", store_id, e)
+        except Exception as e:
+            log.warning("store=%s bank sync failed: %s", store_id, e)
+
+    # ── Stale review reminder (currently store-agnostic, uses settings.store_id) ──
     try:
         await _send_stale_review_reminder(bot)
     except Exception as e:

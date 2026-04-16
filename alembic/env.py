@@ -44,7 +44,12 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_schemas=True,                      # track canonical/platform/ops schemas
+            version_table_schema="public",             # alembic_version stays in public
+        )
         with context.begin_transaction():
             context.run_migrations()
 

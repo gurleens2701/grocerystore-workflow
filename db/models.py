@@ -1,7 +1,11 @@
 """
-SQLAlchemy 2.0 ORM models — one set of tables per store database.
-Every table has store_id so rows are always traceable to a specific store.
-Tables that can be edited by both bot and owner have last_updated_by + last_updated_at.
+SQLAlchemy 2.0 ORM models.
+
+Schema layout (post-migration 007):
+  public       — pending_state (transient bot state)
+  canonical    — business data: daily_sales, invoices, expenses, bank_transactions, …
+  platform     — store config: stores, store_workflows, store_scheduler_policies
+  ops          — monitoring: job_history, audit_logs
 """
 
 from datetime import datetime, date as date_type
@@ -9,8 +13,8 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger, Boolean, Date, DateTime, Integer, Numeric,
-    String, Text, UniqueConstraint, func,
+    BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Numeric,
+    String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -26,6 +30,7 @@ class Base(DeclarativeBase):
 
 class PendingState(Base):
     __tablename__ = "pending_state"
+    # Stays in public schema — transient operational state, not business data
     __table_args__ = (UniqueConstraint("store_id", "state_key"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -41,7 +46,7 @@ class PendingState(Base):
 
 class DailySales(Base):
     __tablename__ = "daily_sales"
-    __table_args__ = (UniqueConstraint("store_id", "sale_date"),)
+    __table_args__ = (UniqueConstraint("store_id", "sale_date"), {"schema": "canonical"})
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -98,6 +103,7 @@ class DailySales(Base):
 
 class Invoice(Base):
     __tablename__ = "invoices"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -121,6 +127,7 @@ class Invoice(Base):
 
 class Expense(Base):
     __tablename__ = "expenses"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -142,6 +149,7 @@ class Expense(Base):
 
 class Rebate(Base):
     __tablename__ = "rebates"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -163,6 +171,7 @@ class Rebate(Base):
 
 class Revenue(Base):
     __tablename__ = "revenues"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -184,6 +193,7 @@ class Revenue(Base):
 
 class BankTransaction(Base):
     __tablename__ = "bank_transactions"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -214,7 +224,7 @@ class BankTransaction(Base):
 
 class TransactionRule(Base):
     __tablename__ = "transaction_rules"
-    __table_args__ = (UniqueConstraint("store_id", "pattern"),)
+    __table_args__ = (UniqueConstraint("store_id", "pattern"), {"schema": "canonical"})
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -233,6 +243,7 @@ class TransactionRule(Base):
 
 class VendorPrice(Base):
     __tablename__ = "vendor_prices"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -250,7 +261,7 @@ class VendorPrice(Base):
 
 class StoreHealthScore(Base):
     __tablename__ = "store_health_scores"
-    __table_args__ = (UniqueConstraint("store_id", "week_start"),)
+    __table_args__ = (UniqueConstraint("store_id", "week_start"), {"schema": "canonical"})
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -269,6 +280,7 @@ class StoreHealthScore(Base):
 
 class InvoiceItem(Base):
     __tablename__ = "invoice_items"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -293,6 +305,7 @@ class InvoiceItem(Base):
 
 class MessageLog(Base):
     __tablename__ = "message_log"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -309,9 +322,95 @@ class MessageLog(Base):
 
 class ConversationHistory(Base):
     __tablename__ = "conversation_history"
+    __table_args__ = {"schema": "canonical"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     store_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # "user" or "assistant"
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ===========================================================================
+# platform schema — store config (control panel)
+# ===========================================================================
+
+class Store(Base):
+    """One row per store. Source of truth for store identity and routing."""
+    __tablename__ = "stores"
+    __table_args__ = {"schema": "platform"}
+
+    store_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    store_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    pos_type: Mapped[str] = mapped_column(String(32), nullable=False)    # nrs | modisoft | manual
+    chat_id: Mapped[str] = mapped_column(String(64), nullable=False)     # Telegram chat ID
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class StoreWorkflow(Base):
+    """Feature on/off switches per store. One row per store."""
+    __tablename__ = "store_workflows"
+    __table_args__ = {"schema": "platform"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), ForeignKey("platform.stores.store_id"), nullable=False, unique=True)
+    daily_report_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    daily_report_mode: Mapped[str] = mapped_column(String(32), server_default=text("'nrs_pull'"), nullable=False)
+    manual_entry_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    nightly_sheet_sync: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    bank_recon_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
+    month_end_summary: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    weekly_bank_summary: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    invoice_ocr_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
+    unified_agent_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class StoreSchedulerPolicy(Base):
+    """When each scheduled job runs per store. One row per store+job."""
+    __tablename__ = "store_scheduler_policies"
+    __table_args__ = (UniqueConstraint("store_id", "job_name"), {"schema": "platform"})
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), ForeignKey("platform.stores.store_id"), nullable=False)
+    job_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    schedule: Mapped[str] = mapped_column(String(64), nullable=False)   # cron or label like 'every_4h'
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ===========================================================================
+# ops schema — monitoring + audit trail
+# ===========================================================================
+
+class JobHistory(Base):
+    """Every scheduler job run is logged here. Your primary 'did it run?' source."""
+    __tablename__ = "job_history"
+    __table_args__ = {"schema": "ops"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str | None] = mapped_column(String(64), nullable=True)   # None for platform-level jobs
+    job_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)           # started | success | failed
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ran_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AuditLog(Base):
+    """Every data change — who changed what, when. Who to blame when a number is wrong."""
+    __tablename__ = "audit_logs"
+    __table_args__ = {"schema": "ops"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)           # owner | bot | scheduler | admin
+    action: Mapped[str] = mapped_column(String(256), nullable=False)
+    table_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    record_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    old_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    new_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
