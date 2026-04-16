@@ -22,11 +22,13 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -37,6 +39,21 @@ _bot_instance: Bot | None = None
 def get_bot() -> Bot | None:
     """Return the bot instance (available after build_app)."""
     return _bot_instance
+
+
+async def _guard_known_store(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Runs before every handler (group=-1). Rejects updates from unknown chats.
+    Any chat_id not in platform.stores is silently dropped.
+    If this is triggering unexpectedly, check platform.stores.chat_id values.
+    """
+    if not update.effective_chat:
+        return
+    from config.store_registry import load_store
+    store = await load_store(chat_id=str(update.effective_chat.id))
+    if store is None:
+        log.warning("Rejected update from unknown chat_id=%s", update.effective_chat.id)
+        raise ApplicationHandlerStop
 
 from config.settings import settings
 from config.store_registry import load_store, load_all_active_stores
@@ -2521,6 +2538,9 @@ def build_app() -> Application:
     global _bot_instance
     app = Application.builder().token(settings.telegram_bot_token).build()
     _bot_instance = app.bot
+
+    # Guard: reject updates from any chat not in platform.stores (runs first, group=-1)
+    app.add_handler(TypeHandler(Update, _guard_known_store), group=-1)
 
     # Onboarding conversation — runs on /start or first message
     onboarding_conv = ConversationHandler(
