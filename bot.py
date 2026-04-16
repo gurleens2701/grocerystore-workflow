@@ -482,22 +482,40 @@ def _parse_daily_date(text: str) -> str:
 
 
 async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool:
-    """Fetch NRS data, send left side + prompt. Returns True on success."""
+    """Fetch POS data via dispatcher, send left side + prompt. Returns True on success."""
     try:
         log.info("_do_daily_fetch called with target_date=%r", target_date)
         label = target_date if target_date else "today's"
-        await bot.send_message(chat_id=chat_id, text=f"⏳ Fetching {label} data from NRS...", parse_mode=None)
-        sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales, target_date)
-        await save_state(settings.store_id, _STATE_SALES, sales)
 
-        # Load manual rules from DB — determines what labels to show in the prompt
+        # Load store profile — needed for dispatcher (pos_type) and manual rules
+        store = None
         manual_rules = None
         try:
             store = await load_store(chat_id=str(chat_id))
             if store:
                 manual_rules = store.get_manual_rules()
         except Exception as _e:
-            log.warning("Could not load store rules for daily prompt: %s", _e)
+            log.warning("Could not load store profile: %s", _e)
+
+        pos_label = (store.pos_type.upper() if store else "NRS")
+        await bot.send_message(chat_id=chat_id, text=f"Fetching {label} data from {pos_label}...", parse_mode=None)
+
+        if store:
+            from tools.pos.dispatcher import fetch_daily_sales as dispatch_fetch
+            from datetime import date as date_cls, timedelta
+            parsed_date = None
+            if target_date:
+                try:
+                    from datetime import datetime
+                    parsed_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+            sales = await dispatch_fetch(store, parsed_date)
+        else:
+            # Fallback: use legacy nrs_tools directly
+            sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales, target_date)
+
+        await save_state(settings.store_id, _STATE_SALES, sales)
 
         msg = _fmt_left(sales) + _prompt_for_right_side(manual_rules)
         await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)

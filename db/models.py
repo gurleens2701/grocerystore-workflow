@@ -471,3 +471,21 @@ class StoreBankRule(Base):
     confirmed_count: Mapped[int] = mapped_column(Integer, server_default=text("1"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ===========================================================================
+# raw_nrs schema — raw POS payloads (safety net for re-processing)
+# ===========================================================================
+
+class RawNRSPayload(Base):
+    """One row per NRS daily stats fetch. Stores the unmodified API response.
+    Fix point: if transform logic had a bug, re-run transform from here without
+    re-fetching from NRS."""
+    __tablename__ = "raw_sales_payloads"
+    __table_args__ = {"schema": "raw_nrs"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    fetch_date: Mapped[date_type] = mapped_column(Date, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

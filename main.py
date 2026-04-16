@@ -16,6 +16,7 @@ import asyncio
 import logging
 import signal
 import sys
+from datetime import date
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -109,6 +110,31 @@ async def run_bot() -> None:
         trigger=CronTrigger(day="last", hour=8, minute=0, timezone=tz),
         id="month_end_cashflow",
         name="Month-End Cash Flow Summary",
+        replace_existing=True,
+    )
+
+    # Raw NRS payload retention — delete rows older than 90 days (runs weekly Sunday 3 AM)
+    async def _purge_old_raw_nrs_payloads() -> None:
+        try:
+            from datetime import timedelta
+            from sqlalchemy import text as sa_text
+            from db.database import get_async_session
+            cutoff = date.today() - timedelta(days=90)
+            async with get_async_session() as session:
+                result = await session.execute(
+                    sa_text("DELETE FROM raw_nrs.raw_sales_payloads WHERE fetched_at < :cutoff"),
+                    {"cutoff": cutoff},
+                )
+                await session.commit()
+            log.info("Purged %d raw NRS payload rows older than %s", result.rowcount, cutoff)
+        except Exception as e:
+            log.error("Raw NRS payload retention job failed: %s", e)
+
+    scheduler.add_job(
+        _purge_old_raw_nrs_payloads,
+        trigger=CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=tz),
+        id="purge_raw_nrs_payloads",
+        name="Raw NRS Payload Retention (90-day purge)",
         replace_existing=True,
     )
 
