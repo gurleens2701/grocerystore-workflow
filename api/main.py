@@ -78,13 +78,13 @@ class LoginResponse(BaseModel):
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(body: LoginRequest):
-    if not authenticate_user(body.username, body.password):
+    ok, store_ids = await authenticate_user(body.username, body.password)
+    if not ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    store_ids = settings.allowed_stores
     token = create_access_token({"sub": body.username, "store_ids": store_ids})
     return LoginResponse(
         access_token=token,
-        store_name=store_ids[0].replace("_", " ").title(),
+        store_name=store_ids[0].replace("_", " ").title() if store_ids else "",
         store_ids=store_ids,
     )
 
@@ -105,9 +105,16 @@ async def me(user: dict = Depends(get_current_user)):
 
 @app.get("/api/stores")
 async def list_stores(user: dict = Depends(get_current_user)):
+    from db.models import Store
+    from sqlalchemy import select
     store_ids: list[str] = user.get("store_ids", [settings.store_id])
+    async with get_session_for_store("_") as session:
+        rows = (await session.execute(
+            select(Store).where(Store.store_id.in_(store_ids))
+        )).scalars().all()
+    name_map = {r.store_id: r.store_name for r in rows}
     return [
-        {"id": sid, "name": sid.replace("_", " ").title()}
+        {"id": sid, "name": name_map.get(sid, sid.replace("_", " ").title())}
         for sid in store_ids
     ]
 
@@ -322,13 +329,12 @@ async def web_chat(body: ChatRequest, user: dict = Depends(get_current_user)):
     # Mirror to Telegram so owner sees it
     try:
         from telegram import Bot
+        from config.store_registry import load_store
+        store = await load_store(store_id=sid)
+        chat_id = store.chat_id if store else settings.telegram_chat_id
         bot = Bot(token=settings.telegram_bot_token)
         tg_text = f"💬 *{sender}*: {msg}\n\n{reply}"
-        await bot.send_message(
-            chat_id=settings.telegram_chat_id,
-            text=tg_text,
-            parse_mode="Markdown",
-        )
+        await bot.send_message(chat_id=int(chat_id), text=tg_text, parse_mode="Markdown")
     except Exception:
         pass  # Telegram mirror failure must not block web response
 

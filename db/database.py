@@ -66,15 +66,14 @@ def _get_store_engine(store_id: str) -> tuple[AsyncEngine, async_sessionmaker]:
 
 @asynccontextmanager
 async def get_session_for_store(store_id: str) -> AsyncGenerator[AsyncSession, None]:
-    """Per-store async session. Use this in the API when store_id comes from the request."""
-    _, session_maker = _get_store_engine(store_id)
-    async with session_maker() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+    """
+    Session for a given store. All store data now lives in one shared database
+    (canonical schema), so this is just an alias for get_async_session().
+    The store_id argument is accepted for call-site compatibility but ignored —
+    data isolation is enforced by WHERE store_id = sid in every query.
+    """
+    async with get_async_session() as session:
+        yield session
 
 
 # ---------------------------------------------------------------------------
