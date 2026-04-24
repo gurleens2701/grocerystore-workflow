@@ -74,16 +74,44 @@ async def _fetch_nrs(store: "StoreProfile", target_date: date) -> dict:
 
 
 async def _fetch_modisoft(store: "StoreProfile", target_date: date) -> dict:
-    """Fetch from Modisoft, save raw payload, return canonical dict."""
-    from tools.pos.modisoft.client import fetch_raw_stats
+    """Fetch from Modisoft mobile API, save raw payload, return canonical dict."""
+    from tools.pos.modisoft.client import fetch_raw_closing, ModisoftTokenExpiredError
     from tools.pos.modisoft.transformer import transform_daily_sales
 
     log.info("Fetching Modisoft daily sales for %s on %s", store.store_id, target_date)
-    raw = await fetch_raw_stats(target_date, credentials={})
+    try:
+        raw = await fetch_raw_closing(store.store_id, target_date)
+    except ModisoftTokenExpiredError:
+        # Token was cleared inside the client — retry once with fresh auth
+        log.info("Modisoft token expired — retrying with fresh login")
+        raw = await fetch_raw_closing(store.store_id, target_date)
 
-    # TODO: save raw payload to raw_modisoft schema once that table exists
+    await _save_raw_modisoft_payload(store.store_id, target_date, raw)
 
-    return transform_daily_sales(raw, target_date)
+    canonical = transform_daily_sales(raw, target_date)
+    log.info(
+        "Modisoft fetch complete for %s: product_sales=%.2f fuel=%.2f grand_total=%.2f",
+        store.store_id, canonical.get("product_sales", 0),
+        canonical.get("gas_dollars", 0), canonical.get("grand_total", 0),
+    )
+    return canonical
+
+
+async def _save_raw_modisoft_payload(store_id: str, fetch_date: date, payload: dict) -> None:
+    """
+    Persist raw Modisoft response to pending_state (temporary safety net).
+    When raw_modisoft.raw_sales_payloads table exists, move this there.
+    """
+    try:
+        from db.state import save_state
+        await save_state(
+            store_id,
+            f"modisoft_raw_{fetch_date.isoformat()}",
+            {"payload": payload, "fetched_at": str(fetch_date)},
+        )
+        log.debug("Saved raw Modisoft payload for %s on %s", store_id, fetch_date)
+    except Exception:
+        log.exception("Failed to save raw Modisoft payload — continuing")
 
 
 async def _save_raw_nrs_payload(store_id: str, fetch_date: date, payload: dict) -> None:
