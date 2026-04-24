@@ -28,8 +28,6 @@ from pathlib import Path
 # Make sure the project root is on the path when run from any directory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-TEMPLATE_STORE_ID = "moraine"   # used as the default template for rules/mappings
-
 SUPPORTED_POS = ["nrs", "modisoft", "manual"]
 
 DEFAULT_JOBS = [
@@ -39,6 +37,73 @@ DEFAULT_JOBS = [
     ("weekly_summary", "0 18 * * 0"),
     ("cashflow",       "0 8 L * *"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Daily sheet templates — picked based on POS type (can be edited after via
+# scripts/manage_store.py). Each tuple is:
+#   (section, field_name, label, source, display_order)
+# Fix point: if you want a new default template, add an entry to TEMPLATES.
+# ---------------------------------------------------------------------------
+
+# For an NRS convenience store (no fuel), like Moraine Foodmart.
+# Owner types lotto + food_stamp manually, rest comes from NRS API.
+NRS_CONVENIENCE_TEMPLATE = [
+    ("left",  "product_sales", "TOTAL",        "api",    1),
+    ("left",  "lotto_in",      "IN. LOTTO",    "manual", 2),
+    ("left",  "lotto_online",  "ON. LINE",     "manual", 3),
+    ("left",  "sales_tax",     "SALES TAX",    "api",    4),
+    ("left",  "gpi",           "GPI",          "api",    5),
+    ("right", "cash_drop",     "CASH DROP",    "api",    1),
+    ("right", "card",          "C.CARD",       "api",    2),
+    ("right", "check",         "CHECK",        "api",    3),
+    ("right", "lotto_po",      "LOTTO PO",     "manual", 4),
+    ("right", "lotto_cr",      "LOTTO CR",     "manual", 5),
+    ("right", "atm",           "ATM",          "api",    6),
+    ("right", "pull_tab",      "PULL TAB",     "api",    7),
+    ("right", "coupon",        "COUPON",       "api",    8),
+    ("right", "food_stamp",    "FOOD STAMP",   "manual", 9),
+    ("right", "loyalty",       "LOYALTY",      "api",   10),
+    ("right", "vendor",        "VENDOR",       "api",   11),
+]
+
+# For a Modisoft fuel station — most fields come from the mobile API.
+# Fuel $ and gallons are extra fields Modisoft gives us for free.
+MODISOFT_FUEL_TEMPLATE = [
+    ("left",  "product_sales", "PRODUCT",      "api",    1),
+    ("left",  "gas_dollars",   "GAS $",        "api",    2),
+    ("left",  "gas_gallons",   "GAS GAL",      "api",    3),
+    ("left",  "lotto_in",      "LOTTO",        "api",    4),
+    ("left",  "sales_tax",     "SALES TAX",    "api",    5),
+    ("right", "cash_drop",     "CASH DROP",    "api",    1),
+    ("right", "credit",        "CREDIT",       "api",    2),
+    ("right", "debit",         "DEBIT",        "api",    3),
+    ("right", "food_stamp",    "FOOD STAMP",   "api",    4),
+    ("right", "lotto_payout",  "LOTTO PO",     "api",    5),
+    ("right", "atm",           "ATM",          "api",    6),
+    ("right", "pull_tab",      "PULL TAB",     "api",    7),
+    ("right", "coupon",        "COUPON",       "api",    8),
+    ("right", "vendor",        "VENDOR",       "api",    9),
+]
+
+# For a manual-entry store (no POS connector) — everything is manual.
+MANUAL_TEMPLATE = [
+    ("left",  "product_sales", "TOTAL",        "manual", 1),
+    ("left",  "lotto_in",      "IN. LOTTO",    "manual", 2),
+    ("left",  "lotto_online",  "ON. LINE",     "manual", 3),
+    ("left",  "sales_tax",     "SALES TAX",    "manual", 4),
+    ("right", "cash_drop",     "CASH DROP",    "manual", 1),
+    ("right", "card",          "C.CARD",       "manual", 2),
+    ("right", "check",         "CHECK",        "manual", 3),
+    ("right", "food_stamp",    "FOOD STAMP",   "manual", 4),
+    ("right", "vendor",        "VENDOR",       "manual", 5),
+]
+
+TEMPLATES = {
+    "nrs":       ("NRS convenience store (like Moraine — no fuel)", NRS_CONVENIENCE_TEMPLATE),
+    "modisoft":  ("Modisoft fuel station (product + fuel + auto payments)", MODISOFT_FUEL_TEMPLATE),
+    "manual":    ("Manual entry only (owner types every number)", MANUAL_TEMPLATE),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -142,14 +207,29 @@ async def insert_scheduler_policies(store_id: str) -> None:
     print(f"  platform.store_scheduler_policies ({len(DEFAULT_JOBS)} jobs) ✓")
 
 
-async def copy_report_rules(store_id: str) -> int:
-    """Copy daily_report_rules from TEMPLATE_STORE_ID to store_id."""
+async def apply_report_template(store_id: str, template: list[tuple]) -> int:
+    """Insert daily_report_rules from the given template into platform tables."""
+    from db.database import get_async_session
+    from db.models import StoreDailyReportRule
+    async with get_async_session() as s:
+        for section, field_name, label, source, order in template:
+            s.add(StoreDailyReportRule(
+                store_id=store_id, section=section, field_name=field_name,
+                label=label, source=source, display_order=order,
+            ))
+        await s.commit()
+    print(f"  platform.store_daily_report_rules ({len(template)} fields) ✓")
+    return len(template)
+
+
+async def copy_report_rules_from(store_id: str, source_store_id: str) -> int:
+    """Copy daily_report_rules from another existing store."""
     from db.database import get_async_session
     from db.models import StoreDailyReportRule
     from sqlalchemy import select
     async with get_async_session() as s:
         rows = (await s.execute(
-            select(StoreDailyReportRule).where(StoreDailyReportRule.store_id == TEMPLATE_STORE_ID)
+            select(StoreDailyReportRule).where(StoreDailyReportRule.store_id == source_store_id)
         )).scalars().all()
         for r in rows:
             s.add(StoreDailyReportRule(
@@ -157,18 +237,18 @@ async def copy_report_rules(store_id: str) -> int:
                 label=r.label, source=r.source, display_order=r.display_order,
             ))
         await s.commit()
-    print(f"  platform.store_daily_report_rules (copied {len(rows)} rows from {TEMPLATE_STORE_ID}) ✓")
+    print(f"  platform.store_daily_report_rules (copied {len(rows)} rows from {source_store_id}) ✓")
     return len(rows)
 
 
-async def copy_sheet_mappings(store_id: str) -> int:
-    """Copy sheet_mappings from TEMPLATE_STORE_ID to store_id."""
+async def copy_sheet_mappings_from(store_id: str, source_store_id: str) -> int:
+    """Copy sheet_mappings from another store as a starting point for column layout."""
     from db.database import get_async_session
     from db.models import StoreSheetMapping
     from sqlalchemy import select
     async with get_async_session() as s:
         rows = (await s.execute(
-            select(StoreSheetMapping).where(StoreSheetMapping.store_id == TEMPLATE_STORE_ID)
+            select(StoreSheetMapping).where(StoreSheetMapping.store_id == source_store_id)
         )).scalars().all()
         for r in rows:
             s.add(StoreSheetMapping(
@@ -176,26 +256,36 @@ async def copy_sheet_mappings(store_id: str) -> int:
                 column_index=r.column_index, column_header=r.column_header,
             ))
         await s.commit()
-    print(f"  platform.store_sheet_mappings (copied {len(rows)} rows from {TEMPLATE_STORE_ID}) ✓")
+    print(f"  platform.store_sheet_mappings (copied {len(rows)} rows from {source_store_id}) ✓")
     return len(rows)
 
 
-async def copy_tool_policies(store_id: str) -> int:
-    """Copy tool_policies from TEMPLATE_STORE_ID, switching to pos_type-appropriate tools."""
+async def copy_tool_policies_from(store_id: str, source_store_id: str) -> int:
+    """Copy tool_policies from another store — lets new stores inherit the same agent tools."""
     from db.database import get_async_session
     from db.models import StoreToolPolicy
     from sqlalchemy import select
     async with get_async_session() as s:
         rows = (await s.execute(
-            select(StoreToolPolicy).where(StoreToolPolicy.store_id == TEMPLATE_STORE_ID)
+            select(StoreToolPolicy).where(StoreToolPolicy.store_id == source_store_id)
         )).scalars().all()
         for r in rows:
             s.add(StoreToolPolicy(
                 store_id=store_id, tool_name=r.tool_name, enabled=r.enabled,
             ))
         await s.commit()
-    print(f"  platform.store_tool_policies (copied {len(rows)} tools from {TEMPLATE_STORE_ID}) ✓")
+    print(f"  platform.store_tool_policies (copied {len(rows)} tools from {source_store_id}) ✓")
     return len(rows)
+
+
+async def list_existing_stores() -> list[tuple[str, str]]:
+    """Returns [(store_id, store_name), ...] — used to pick a source store to copy from."""
+    from db.database import get_async_session
+    from db.models import Store
+    from sqlalchemy import select
+    async with get_async_session() as s:
+        rows = (await s.execute(select(Store).order_by(Store.store_name))).scalars().all()
+    return [(r.store_id, r.store_name) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +336,23 @@ async def test_nrs_login() -> bool:
         return True
     except Exception as e:
         print(f"  NRS login: ✗  {e}")
+        return False
+
+
+async def test_modisoft_login(store_id: str) -> bool:
+    """POST to Modisoft mobile login API — fast (~1s) verification."""
+    try:
+        from tools.pos.modisoft.client import authenticate, list_modisoft_stores
+        token = await authenticate(store_id)
+        print(f"  Modisoft login: ✓  SToken={token[:8]}…")
+        stores = await list_modisoft_stores(store_id)
+        if stores:
+            print(f"  Modisoft stores accessible: {len(stores)}")
+            for s in stores[:3]:
+                print(f"    - StoreId={s.get('StoreId')} name={s.get('StoreName')!r}")
+        return True
+    except Exception as e:
+        print(f"  Modisoft login: ✗  {e}")
         return False
 
 
@@ -315,29 +422,87 @@ async def main() -> None:
         print("--- Modisoft Credentials ---")
         secrets["MODISOFT_USERNAME"] = ask("Modisoft username")
         secrets["MODISOFT_PASSWORD"] = ask_secret("Modisoft password")
+        mid = input("  Modisoft internal StoreId (optional, press Enter to auto-discover): ").strip()
+        if mid:
+            secrets["MODISOFT_STORE_ID"] = mid
 
     print()
     print("--- Google Sheets ---")
+    print("  The service account must have EDIT access to this sheet.")
+    print("  Service account email:")
+    try:
+        import json as _j
+        creds = _j.loads(Path("config/google_credentials.json").read_text())
+        print(f"    → {creds.get('client_email', '(not found)')}")
+    except Exception:
+        print("    → (check config/google_credentials.json)")
     google_sheet_id = ask("Google Sheet ID (the long ID from the URL)")
     secrets["GOOGLE_SHEET_ID"] = google_sheet_id
 
-    # --- Template copy options ---
+    # --- Daily sheet template ---
     print()
-    copy_rules = yn(f"Copy daily sheet fields from {TEMPLATE_STORE_ID} as starting point?", default=True)
-    copy_mappings = yn(f"Copy Google Sheet column mappings from {TEMPLATE_STORE_ID}?", default=True)
-    copy_tools = yn(f"Copy agent tool policies from {TEMPLATE_STORE_ID}?", default=True)
+    print("--- Daily sheet template ---")
+    print("  Each store has its own daily sheet fields. Pick a starting point.")
+    print("  You can edit every field later with:")
+    print("     docker compose exec app python scripts/manage_store.py")
+    print()
+    existing = await list_existing_stores()
+    options = [
+        ("default_pos",   f"Default template for {pos_type} → {TEMPLATES[pos_type][0]}"),
+    ]
+    if existing:
+        options.append(("copy_store", f"Copy from an existing store ({len(existing)} available)"))
+    options.append(("blank", "Blank — add fields one by one in manage_store.py later"))
+
+    for i, (_, label) in enumerate(options, 1):
+        print(f"    {i}. {label}")
+    choice = ask("Pick", default="1")
+    try:
+        tmpl_choice = options[int(choice) - 1][0]
+    except (ValueError, IndexError):
+        tmpl_choice = "default_pos"
+
+    source_store_id: str | None = None
+    if tmpl_choice == "copy_store":
+        print("\n  Pick source store:")
+        for i, (sid, name) in enumerate(existing, 1):
+            print(f"    {i}. {name}  ({sid})")
+        raw = ask("Source store number", default="1")
+        try:
+            source_store_id = existing[int(raw) - 1][0]
+        except (ValueError, IndexError):
+            source_store_id = existing[0][0]
+
+    # Preview the template so owner knows what they're getting
+    if tmpl_choice == "default_pos":
+        print(f"\n  Preview — {TEMPLATES[pos_type][0]}:")
+        for section, field, label, source, order in TEMPLATES[pos_type][1]:
+            tag = "[manual]" if source == "manual" else "[auto]  "
+            print(f"    {section:<5} #{order:<2}  {tag}  {label:<15} ({field})")
+
+    # Copy tool policies + sheet column layout from an existing store (not template-based)
+    copy_tools = len(existing) > 0 and yn(
+        f"\nCopy agent tool policies from {existing[0][1]}? (recommended)",
+        default=True,
+    )
+    copy_mappings = source_store_id is not None  # sheet columns come with store copy
 
     # --- Confirm ---
     print()
-    print("-" * 40)
-    print(f"  store_id  : {store_id}")
-    print(f"  name      : {store_name}")
-    print(f"  pos_type  : {pos_type}")
-    print(f"  chat_id   : {chat_id}")
-    print(f"  timezone  : {timezone}")
-    print(f"  sheet_id  : {google_sheet_id}")
-    print(f"  rules     : {'copy from ' + TEMPLATE_STORE_ID if copy_rules else 'none (add manually)'}")
-    print("-" * 40)
+    print("-" * 55)
+    print(f"  store_id       : {store_id}")
+    print(f"  name           : {store_name}")
+    print(f"  pos_type       : {pos_type}")
+    print(f"  chat_id        : {chat_id}")
+    print(f"  timezone       : {timezone}")
+    print(f"  sheet_id       : {google_sheet_id}")
+    if tmpl_choice == "default_pos":
+        print(f"  daily template : default for {pos_type}")
+    elif tmpl_choice == "copy_store":
+        print(f"  daily template : copy from {source_store_id}")
+    else:
+        print(f"  daily template : blank")
+    print("-" * 55)
     if not yn("Proceed?", default=True):
         print("Aborted.")
         sys.exit(0)
@@ -353,12 +518,20 @@ async def main() -> None:
     await insert_store(store_id, store_name, pos_type, chat_id, timezone)
     await insert_workflows(store_id, pos_type)
     await insert_scheduler_policies(store_id)
-    if copy_rules:
-        await copy_report_rules(store_id)
-    if copy_mappings:
-        await copy_sheet_mappings(store_id)
-    if copy_tools:
-        await copy_tool_policies(store_id)
+
+    # Daily report rules — from chosen template
+    if tmpl_choice == "default_pos":
+        await apply_report_template(store_id, TEMPLATES[pos_type][1])
+    elif tmpl_choice == "copy_store" and source_store_id:
+        await copy_report_rules_from(store_id, source_store_id)
+    else:
+        print("  platform.store_daily_report_rules (skipped — add fields later)")
+
+    # Sheet column mapping — only if copying from another store (column layout is per-store)
+    if copy_mappings and source_store_id:
+        await copy_sheet_mappings_from(store_id, source_store_id)
+    if copy_tools and existing:
+        await copy_tool_policies_from(store_id, existing[0][0])
 
     # --- Connectivity tests ---
     print()
@@ -375,16 +548,20 @@ async def main() -> None:
             await test_nrs_login()
         else:
             print("  NRS login: skipped")
+    elif pos_type == "modisoft":
+        run_mod = ask("Test Modisoft login now? [Y/n]", default="y").lower()
+        if run_mod.startswith("y"):
+            await test_modisoft_login(store_id)
 
     # --- Done ---
     print()
     print(f"✅  Store \"{store_name}\" ({store_id}) onboarded successfully!")
     print()
     print("Next steps:")
-    print(f"  1. Review/edit daily fields:")
-    print(f"       SELECT * FROM platform.store_daily_report_rules WHERE store_id = '{store_id}';")
-    print(f"  2. Review/edit sheet column mapping:")
-    print(f"       SELECT * FROM platform.store_sheet_mappings WHERE store_id = '{store_id}';")
+    print(f"  1. Customize daily sheet fields, tools, schedules (interactive):")
+    print(f"       docker compose exec app python scripts/manage_store.py")
+    print(f"  2. Create dashboard login for the owner:")
+    print(f"       docker compose exec app python scripts/create_user.py")
     print(f"  3. Restart the bot:")
     print(f"       docker compose restart app")
     print(f"  4. Send /daily from the store's Telegram chat to verify.")
