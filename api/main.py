@@ -168,6 +168,18 @@ async def get_sales(
     ]
 
 
+@app.get("/api/health")
+async def get_health(
+    period: str = "this_week",
+    store_id: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    """Store health score for the dashboard. period: this_week|last_week|this_month|last_month."""
+    from tools.health_score import build_health_score
+    sid = resolve_store(store_id, user)
+    return await build_health_score(sid, period)
+
+
 def _calc_over_short(r: DailySales) -> Optional[float]:
     if r.lotto_po is None:
         return None
