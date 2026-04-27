@@ -22,6 +22,7 @@ from langchain_core.tools import tool
 from sqlalchemy import and_, select, func
 
 from config.settings import settings
+from config.store_context import get_active_store, set_active_store
 from db.database import get_sync_session
 from db.models import (
     DailySales, Expense, Invoice, InvoiceItem, Rebate, Revenue,
