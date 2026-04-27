@@ -140,7 +140,7 @@ def query_sales(days: int = 30) -> str:
     with get_sync_session() as session:
         rows = session.execute(
             select(DailySales)
-            .where(and_(DailySales.store_id == settings.store_id, DailySales.sale_date >= since))
+            .where(and_(DailySales.store_id == get_active_store(), DailySales.sale_date >= since))
             .order_by(DailySales.sale_date.desc())
         ).scalars().all()
     data = [
@@ -160,7 +160,7 @@ def query_expenses(days: int = 30, category: str = "") -> str:
     since = date.today() - timedelta(days=days)
     with get_sync_session() as session:
         stmt = select(Expense).where(
-            and_(Expense.store_id == settings.store_id, Expense.expense_date >= since)
+            and_(Expense.store_id == get_active_store(), Expense.expense_date >= since)
         )
         if category:
             stmt = stmt.where(Expense.category.ilike(f"%{category}%"))
@@ -175,7 +175,7 @@ def query_invoices(days: int = 365, vendor: str = "") -> str:
     since = date.today() - timedelta(days=days)
     with get_sync_session() as session:
         stmt = select(Invoice).where(
-            and_(Invoice.store_id == settings.store_id, Invoice.invoice_date >= since)
+            and_(Invoice.store_id == get_active_store(), Invoice.invoice_date >= since)
         )
         if vendor:
             stmt = stmt.where(Invoice.vendor.ilike(f"%{vendor}%"))
@@ -191,7 +191,7 @@ def query_rebates(days: int = 30) -> str:
     with get_sync_session() as session:
         rows = session.execute(
             select(Rebate)
-            .where(and_(Rebate.store_id == settings.store_id, Rebate.rebate_date >= since))
+            .where(and_(Rebate.store_id == get_active_store(), Rebate.rebate_date >= since))
             .order_by(Rebate.rebate_date.desc())
         ).scalars().all()
     data = [{"date": str(r.rebate_date), "vendor": r.vendor, "amount": float(r.amount)} for r in rows]
@@ -205,7 +205,7 @@ def query_revenue(days: int = 30) -> str:
     with get_sync_session() as session:
         rows = session.execute(
             select(Revenue)
-            .where(and_(Revenue.store_id == settings.store_id, Revenue.revenue_date >= since))
+            .where(and_(Revenue.store_id == get_active_store(), Revenue.revenue_date >= since))
             .order_by(Revenue.revenue_date.desc())
         ).scalars().all()
     data = [{"date": str(r.revenue_date), "category": r.category, "amount": float(r.amount)} for r in rows]
@@ -223,14 +223,14 @@ def query_vendors() -> str:
                 func.max(Invoice.invoice_date).label("last_date"),
                 func.count(Invoice.id).label("invoice_count"),
             )
-            .where(Invoice.store_id == settings.store_id)
+            .where(Invoice.store_id == get_active_store())
             .group_by(Invoice.vendor)
             .order_by(func.sum(Invoice.amount).desc())
         ).fetchall()
         item_vendors = session.execute(
             select(InvoiceItem.vendor, func.count(InvoiceItem.id).label("item_count"),
                    func.max(InvoiceItem.invoice_date).label("last_date"))
-            .where(InvoiceItem.store_id == settings.store_id)
+            .where(InvoiceItem.store_id == get_active_store())
             .group_by(InvoiceItem.vendor)
             .order_by(func.count(InvoiceItem.id).desc())
         ).fetchall()
@@ -254,7 +254,7 @@ def query_prices(product: str) -> str:
         stmt = select(
             InvoiceItem.item_name, InvoiceItem.canonical_name,
             InvoiceItem.unit_price, InvoiceItem.vendor, InvoiceItem.invoice_date,
-        ).where(InvoiceItem.store_id == settings.store_id)
+        ).where(InvoiceItem.store_id == get_active_store())
         if words:
             conditions = [
                 (InvoiceItem.canonical_name.ilike(f"%{w}%") | InvoiceItem.item_name.ilike(f"%{w}%"))
@@ -289,7 +289,7 @@ def query_ordered_items(days: int = 7, vendor: str = "") -> str:
             func.count(Invoice.id).label("count"),
             func.max(Invoice.invoice_date).label("latest"),
         ).where(and_(
-            Invoice.store_id == settings.store_id,
+            Invoice.store_id == get_active_store(),
             Invoice.invoice_date >= since,
         ))
         if vendor:
@@ -328,7 +328,7 @@ def query_bank_transactions(days: int = 7, status: str = "") -> str:
     since = date.today() - timedelta(days=days)
     with get_sync_session() as session:
         stmt = select(BankTransaction).where(and_(
-            BankTransaction.store_id == settings.store_id,
+            BankTransaction.store_id == get_active_store(),
             BankTransaction.transaction_date >= since,
         ))
         if status == "matched":
@@ -389,7 +389,7 @@ def log_expense(category: str, amount: float, date_str: str = "") -> str:
     with get_sync_session() as session:
         existing = session.execute(
             select(Expense).where(and_(
-                Expense.store_id == settings.store_id,
+                Expense.store_id == get_active_store(),
                 Expense.expense_date == entry_date,
                 Expense.category == cat,
             ))
@@ -400,7 +400,7 @@ def log_expense(category: str, amount: float, date_str: str = "") -> str:
             action = "Updated"
         else:
             session.add(Expense(
-                store_id=settings.store_id,
+                store_id=get_active_store(),
                 expense_date=entry_date,
                 category=cat,
                 amount=Decimal(str(amount)),
@@ -447,7 +447,7 @@ def log_invoice(vendor: str, amount: float, date_str: str = "") -> str:
     with get_sync_session() as session:
         existing = session.execute(
             select(Invoice).where(and_(
-                Invoice.store_id == settings.store_id,
+                Invoice.store_id == get_active_store(),
                 Invoice.invoice_date == entry_date,
                 Invoice.vendor == resolved,
             ))
@@ -458,7 +458,7 @@ def log_invoice(vendor: str, amount: float, date_str: str = "") -> str:
             action = "Updated"
         else:
             session.add(Invoice(
-                store_id=settings.store_id,
+                store_id=get_active_store(),
                 vendor=resolved,
                 amount=Decimal(str(amount)),
                 invoice_date=entry_date,
@@ -489,7 +489,7 @@ def log_rebate(vendor: str, amount: float, date_str: str = "") -> str:
     with get_sync_session() as session:
         existing = session.execute(
             select(Rebate).where(and_(
-                Rebate.store_id == settings.store_id,
+                Rebate.store_id == get_active_store(),
                 Rebate.rebate_date == entry_date,
                 Rebate.vendor == v,
             ))
@@ -500,7 +500,7 @@ def log_rebate(vendor: str, amount: float, date_str: str = "") -> str:
             action = "Updated"
         else:
             session.add(Rebate(
-                store_id=settings.store_id,
+                store_id=get_active_store(),
                 rebate_date=entry_date,
                 vendor=v,
                 amount=Decimal(str(amount)),
@@ -531,7 +531,7 @@ def log_payroll(employee: str, amount: float, date_str: str = "") -> str:
     with get_sync_session() as session:
         existing = session.execute(
             select(Expense).where(and_(
-                Expense.store_id == settings.store_id,
+                Expense.store_id == get_active_store(),
                 Expense.expense_date == entry_date,
                 Expense.category == cat,
             ))
@@ -542,7 +542,7 @@ def log_payroll(employee: str, amount: float, date_str: str = "") -> str:
             action = "Updated"
         else:
             session.add(Expense(
-                store_id=settings.store_id,
+                store_id=get_active_store(),
                 expense_date=entry_date,
                 category=cat,
                 amount=Decimal(str(amount)),
@@ -574,7 +574,7 @@ def log_revenue(category: str, amount: float, date_str: str = "") -> str:
     with get_sync_session() as session:
         existing = session.execute(
             select(Revenue).where(and_(
-                Revenue.store_id == settings.store_id,
+                Revenue.store_id == get_active_store(),
                 Revenue.revenue_date == entry_date,
                 Revenue.category == cat,
             ))
@@ -585,7 +585,7 @@ def log_revenue(category: str, amount: float, date_str: str = "") -> str:
             action = "Updated"
         else:
             session.add(Revenue(
-                store_id=settings.store_id,
+                store_id=get_active_store(),
                 revenue_date=entry_date,
                 category=cat,
                 amount=Decimal(str(amount)),
@@ -636,7 +636,7 @@ def log_daily_sales(
     with get_sync_session() as session:
         existing = session.execute(
             select(DailySales).where(and_(
-                DailySales.store_id == settings.store_id,
+                DailySales.store_id == get_active_store(),
                 DailySales.sale_date == entry_date,
             ))
         ).scalar_one_or_none()
@@ -656,7 +656,7 @@ def log_daily_sales(
             action = "Updated"
         else:
             session.add(DailySales(
-                store_id=settings.store_id,
+                store_id=get_active_store(),
                 sale_date=entry_date,
                 product_sales=Decimal(str(product_sales)),
                 lotto_in=Decimal(str(lotto_in)),
@@ -683,7 +683,7 @@ def sync_sheets_now() -> str:
     Use this when the owner asks to sync now or wants fresh data from the sheet.
     """
     from tools.sync import run_nightly_sync
-    store_id = settings.store_id
+    store_id = get_active_store()
 
     loop = asyncio.new_event_loop()
     try:
@@ -823,6 +823,8 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
     history: list of {"role": "user"|"assistant", "content": str} — recent conversation.
     Tool list is loaded per-store from platform.store_tool_policies.
     """
+    from config.store_context import set_active_store, get_active_store
+    set_active_store(store_id)
     tools = _build_tool_list(store_id)
     llm = ChatAnthropic(
         model="claude-sonnet-4-6",

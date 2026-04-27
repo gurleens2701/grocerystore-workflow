@@ -36,7 +36,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./stores:/app/stores:ro
+      - ./stores:/app/stores
       - ./config:/app/config:ro
       - ./reports:/app/reports
 
@@ -54,7 +54,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./stores:/app/stores:ro
+      - ./stores:/app/stores
       - ./config:/app/config:ro
 
   # ── Next.js Dashboard ─────────────────────────────────────────────────────

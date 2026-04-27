@@ -50,12 +50,15 @@ async def _guard_known_store(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.effective_chat:
         return
     from config.store_registry import load_store
+    from config.store_context import set_active_store, get_active_store
     store = await load_store(chat_id=str(update.effective_chat.id))
     if store is None:
         log.warning("Rejected update from unknown chat_id=%s", update.effective_chat.id)
         raise ApplicationHandlerStop
+    set_active_store(store.store_id)
 
 from config.settings import settings
+from config.store_context import get_active_store, set_active_store
 from config.store_registry import load_store, load_all_active_stores
 from db.ops import log_message, save_daily_sales, save_expense, save_invoice, save_invoice_items, save_rebate, save_revenue, save_vendor_price
 from db.state import clear_state, get_state, save_state
@@ -515,11 +518,11 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
             # Fallback: use legacy nrs_tools directly
             sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales, target_date)
 
-        await save_state(settings.store_id, _STATE_SALES, sales)
+        await save_state(get_active_store(), _STATE_SALES, sales)
 
         msg = _fmt_left(sales) + _prompt_for_right_side(manual_rules)
         await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
-        asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", msg))
+        asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", msg))
 
         # Save daily report summary to history so follow-up questions have context
         summary = (
@@ -535,9 +538,9 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
             f"atm=${sales.get('atm', 0):.2f}. "
             f"Still waiting for owner to enter: IN. LOTTO, ON. LINE, LOTTO PO, LOTTO CR, FOOD STAMP."
         )
-        hist = await _load_history(settings.store_id)
+        hist = await _load_history(get_active_store())
         hist.append({"role": "assistant", "content": summary})
-        await save_state(settings.store_id, _STATE_CHAT_HISTORY, hist[-_HISTORY_MAX:])
+        await save_state(get_active_store(), _STATE_CHAT_HISTORY, hist[-_HISTORY_MAX:])
         return True
     except Exception as e:
         log.error("Daily fetch failed: %s", e, exc_info=True)
@@ -556,13 +559,13 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
         else:
             msg = f"❌ Error fetching data: {err_text}"
         await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
-        asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", msg))
+        asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", msg))
         return False
 
 
 async def _do_manual_daily_prompt(bot: Bot, chat_id: str) -> None:
     """Manual-mode: ask owner to send their daily report photo."""
-    await save_state(settings.store_id, _STATE_AWAITING_REPORT, {"pending": True})
+    await save_state(get_active_store(), _STATE_AWAITING_REPORT, {"pending": True})
     msg = (
         "📋 Ready to log today's sales!\n\n"
         "Take a photo of your daily sales report and send it here.\n"
@@ -574,7 +577,7 @@ async def _do_manual_daily_prompt(bot: Bot, chat_id: str) -> None:
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /daily command — triggers fetch (NRS) or photo prompt (manual mode)."""
-    profile = await get_user_profile(settings.store_id)
+    profile = await get_user_profile(get_active_store())
     if profile.get("backoffice") == "manual":
         await _do_manual_daily_prompt(context.bot, settings.telegram_chat_id)
         return ConversationHandler.END
@@ -586,7 +589,7 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle the user's reply with right-side numbers."""
     text = update.message.text.strip()
-    sales = await get_state(settings.store_id, _STATE_SALES)
+    sales = await get_state(get_active_store(), _STATE_SALES)
 
     if not sales:
         await update.message.reply_text(
@@ -627,8 +630,8 @@ async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
         sales_for_sheet.update(right)
 
         log_daily_sales(sales_for_sheet)
-        await save_daily_sales(settings.store_id, sales, right)
-        save_daily_report(settings.store_id, sales, right)
+        await save_daily_sales(get_active_store(), sales, right)
+        save_daily_report(get_active_store(), sales, right)
 
         txns = [
             {"type": "sale", "department": d["name"], "items": d["items"],
@@ -645,13 +648,13 @@ async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
         log.error("Sheets logging failed: %s", e, exc_info=True)
         await update.message.reply_text(f"⚠️ Sheets logging failed: {e}", parse_mode=None)
 
-    await clear_state(settings.store_id, _STATE_SALES)
+    await clear_state(get_active_store(), _STATE_SALES)
     return ConversationHandler.END
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel the current conversation."""
-    await clear_state(settings.store_id, _STATE_SALES)
+    await clear_state(get_active_store(), _STATE_SALES)
     await update.message.reply_text("Cancelled.", parse_mode=None)
     return ConversationHandler.END
 
@@ -668,7 +671,7 @@ async def scheduled_daily(app: Application) -> None:
     stores = await load_all_active_stores()
     if not stores:
         # Fallback to settings if platform.stores not yet seeded (pre-migration)
-        stores_chat_ids = [(settings.store_id, settings.telegram_chat_id)]
+        stores_chat_ids = [(get_active_store(), settings.telegram_chat_id)]
     else:
         stores_chat_ids = [(s.store_id, s.chat_id) for s in stores]
 
@@ -711,7 +714,7 @@ async def scheduled_daily(app: Application) -> None:
         except Exception as e:
             log.warning("store=%s bank sync failed: %s", store_id, e)
 
-    # ── Stale review reminder (currently store-agnostic, uses settings.store_id) ──
+    # ── Stale review reminder (currently store-agnostic, uses get_active_store()) ──
     try:
         await _send_stale_review_reminder(bot)
     except Exception as e:
@@ -731,6 +734,8 @@ async def scheduled_daily_for_store(store_id: str, app: Application) -> None:
     If the store profile is missing or daily_report is disabled, logs and returns.
     """
     from config.store_registry import load_store as _load
+    from config.store_context import set_active_store
+    set_active_store(store_id)
     store = await _load(store_id=store_id)
     if not store:
         log.warning("scheduled_daily_for_store: store_id=%s not found in platform.stores", store_id)
@@ -758,8 +763,10 @@ async def bank_sync_for_store(store_id: str, app: Application) -> None:
     Skips silently if Plaid is not connected for this store.
     """
     from config.store_registry import load_store as _load
+    from config.store_context import set_active_store
     from tools.plaid_tools import is_connected, sync_transactions, fetch_accounts
 
+    set_active_store(store_id)
     store = await _load(store_id=store_id)
     if not store:
         log.warning("bank_sync_for_store: store_id=%s not found", store_id)
@@ -1020,8 +1027,8 @@ async def cmd_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         vendor = parsed["vendor"]
         amount = parsed["amount"]
         entry_date = parsed["entry_date"]
-        invoice_id = await save_invoice(settings.store_id, vendor, amount, entry_date)
-        await save_vendor_price(settings.store_id, vendor, amount, entry_date, invoice_id)
+        invoice_id = await save_invoice(get_active_store(), vendor, amount, entry_date)
+        await save_vendor_price(get_active_store(), vendor, amount, entry_date, invoice_id)
         result = log_cogs_entry(vendor=vendor, amount=amount, entry_date=entry_date)
         await update.message.reply_text(f"✅ {result}", parse_mode=None)
     except Exception as e:
@@ -1084,7 +1091,7 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN,
         )
         # Save a flag so next message is treated as the order list
-        await save_state(settings.store_id, "awaiting_order", {"pending": True})
+        await save_state(get_active_store(), "awaiting_order", {"pending": True})
         return
 
     await _process_order(update, text)
@@ -1161,7 +1168,7 @@ async def _handle_expense(update: Update, text: str) -> None:
         await update.message.reply_text("⚠️ Could not parse. Try: electricity $340 march 10", parse_mode=None)
         return
     try:
-        await save_expense(settings.store_id, parsed["label"], parsed["amount"], parsed["entry_date"])
+        await save_expense(get_active_store(), parsed["label"], parsed["amount"], parsed["entry_date"])
         result = log_expense(parsed["label"], parsed["amount"], parsed["entry_date"])
         await update.message.reply_text(
             f"✅ *Expense logged*\n{parsed['label'].title()} — ${parsed['amount']:.2f} on {parsed['entry_date']}",
@@ -1179,7 +1186,7 @@ async def _handle_rebate(update: Update, text: str) -> None:
         await update.message.reply_text("⚠️ Could not parse. Try: pmhelix rebate $820", parse_mode=None)
         return
     try:
-        await save_rebate(settings.store_id, parsed["label"], parsed["amount"], parsed["entry_date"])
+        await save_rebate(get_active_store(), parsed["label"], parsed["amount"], parsed["entry_date"])
         result = log_rebate(parsed["label"], parsed["amount"], parsed["entry_date"])
         await update.message.reply_text(
             f"✅ *Rebate logged*\n{parsed['label'].title()} — ${parsed['amount']:.2f} on {parsed['entry_date']}",
@@ -1197,7 +1204,7 @@ async def _handle_revenue(update: Update, text: str) -> None:
         await update.message.reply_text("⚠️ Could not parse. Try: car payment $300", parse_mode=None)
         return
     try:
-        await save_revenue(settings.store_id, parsed["label"], parsed["amount"], parsed["entry_date"])
+        await save_revenue(get_active_store(), parsed["label"], parsed["amount"], parsed["entry_date"])
         result = log_revenue(parsed["label"], parsed["amount"], parsed["entry_date"])
         await update.message.reply_text(
             f"✅ *Revenue logged*\n{parsed['label'].title()} — ${parsed['amount']:.2f} on {parsed['entry_date']}",
@@ -1232,8 +1239,8 @@ async def _handle_invoice_text(update: Update, text: str) -> None:
         return
 
     try:
-        invoice_id = await save_invoice(settings.store_id, vendor_match, parsed["amount"], parsed["entry_date"])
-        await save_vendor_price(settings.store_id, vendor_match, parsed["amount"], parsed["entry_date"], invoice_id)
+        invoice_id = await save_invoice(get_active_store(), vendor_match, parsed["amount"], parsed["entry_date"])
+        await save_vendor_price(get_active_store(), vendor_match, parsed["amount"], parsed["entry_date"], invoice_id)
         result = log_cogs_entry(vendor=vendor_match, amount=parsed["amount"], entry_date=parsed["entry_date"])
         await update.message.reply_text(
             f"✅ *Invoice logged*\nVendor: {vendor_match}\nAmount: ${parsed['amount']:.2f}\nDate: {parsed['entry_date']}",
@@ -1253,15 +1260,15 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     """
     text = update.message.text.strip()
     sender = update.effective_user.first_name or "Owner"
-    asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, text))
+    asyncio.create_task(log_message(get_active_store(), "telegram", "user", sender, text))
 
     # ── Onboarding gate — redirect new users before anything else ────────────
-    if not await is_onboarding_complete(settings.store_id):
+    if not await is_onboarding_complete(get_active_store()):
         await onboarding_start(update, context)
         return
 
     # ── Load owner profile (name, language) ─────────────────────────────────
-    profile = await get_user_profile(settings.store_id)
+    profile = await get_user_profile(get_active_store())
     owner_name = profile.get("name", "")
 
     # ── Help shortcut — catch /help, \\help, //help, "help" etc ─────────────
@@ -1274,19 +1281,19 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     # Check if user just clicked an inline button that needs a follow-up text
     from db.state import get_state as _gs
     pending_confirm_keys = [
-        k for k in (await _list_bank_confirm_keys(settings.store_id))
+        k for k in (await _list_bank_confirm_keys(get_active_store()))
     ]
     if pending_confirm_keys:
         key = pending_confirm_keys[0]  # take first pending
-        state = await get_state(settings.store_id, key)
+        state = await get_state(get_active_store(), key)
         if state:
             from tools.bank_reconciler import confirm_transaction
             txn_id = state["txn_id"]
             reconcile_type = state["reconcile_type"]
             subcategory = text.strip()
-            await clear_state(settings.store_id, key)
-            result = await confirm_transaction(settings.store_id, txn_id, reconcile_type, subcategory, sender="user")
-            await clear_state(settings.store_id, f"bk_msg_{txn_id}")
+            await clear_state(get_active_store(), key)
+            result = await confirm_transaction(get_active_store(), txn_id, reconcile_type, subcategory, sender="user")
+            await clear_state(get_active_store(), f"bk_msg_{txn_id}")
             if result:
                 await update.message.reply_text(
                     f"✅ Logged as {reconcile_type}: {subcategory}\n"
@@ -1298,21 +1305,21 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             return
 
     # ── Priority 1: pending daily sheet ─────────────────────────────────────
-    sales = await get_state(settings.store_id, _STATE_SALES)
+    sales = await get_state(get_active_store(), _STATE_SALES)
     if sales:
         # Auto-expire stale sales state after 12h — don't let it hijack chat forever.
         from db.state import get_state_age_hours
-        age_h = await get_state_age_hours(settings.store_id, _STATE_SALES)
+        age_h = await get_state_age_hours(get_active_store(), _STATE_SALES)
         if age_h is not None and age_h > 12:
             log.info("Auto-clearing stale sales state (age=%.1fh)", age_h)
-            await clear_state(settings.store_id, _STATE_SALES)
+            await clear_state(get_active_store(), _STATE_SALES)
             sales = None
     if sales:
         clean_reply = text.strip().lower()
 
         # ── Cancel — escape from daily report state to normal chat ─────────────
         if clean_reply in ("cancel", "nevermind", "never mind", "stop", "exit", "quit", "abort"):
-            await clear_state(settings.store_id, _STATE_SALES)
+            await clear_state(get_active_store(), _STATE_SALES)
             await update.message.reply_text(
                 "Daily report cancelled. What do you need?",
                 parse_mode=None,
@@ -1333,9 +1340,9 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
                 sales_for_sheet = dict(sales)
                 sales_for_sheet.update(right)
                 log_daily_sales(sales_for_sheet)
-                await save_daily_sales(settings.store_id, sales, right)
-                save_daily_report(settings.store_id, sales, right)
-                await clear_state(settings.store_id, _STATE_SALES)
+                await save_daily_sales(get_active_store(), sales, right)
+                save_daily_report(get_active_store(), sales, right)
+                await clear_state(get_active_store(), _STATE_SALES)
                 await update.message.reply_text("✅ Logged to Google Sheets.", parse_mode=None)
             except Exception as e:
                 log.error("Sheets logging failed: %s", e, exc_info=True)
@@ -1346,7 +1353,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         right = _parse_right_side(text)
         if right is not None:
             sales.update(right)
-            await save_state(settings.store_id, _STATE_SALES, sales)
+            await save_state(get_active_store(), _STATE_SALES, sales)
             preview = _build_preview(sales)
             await update.message.reply_text(preview, parse_mode=ParseMode.MARKDOWN)
             await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
@@ -1358,7 +1365,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         )
         if edits:
             sales.update(edits)
-            await save_state(settings.store_id, _STATE_SALES, sales)
+            await save_state(get_active_store(), _STATE_SALES, sales)
             changed = ", ".join(f"{k}=${v:.2f}" for k, v in edits.items())
             preview = _build_preview(sales)
             await update.message.reply_text(
@@ -1372,13 +1379,13 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         # pending report on every message; user already saw it, and spamming
         # makes the bot feel robotic.
         from tools.main_agent import run_agent
-        history = await _load_history(settings.store_id)
+        history = await _load_history(get_active_store())
         try:
             reply = await asyncio.get_event_loop().run_in_executor(
-                None, run_agent, text, settings.store_id, owner_name, history
+                None, run_agent, text, get_active_store(), owner_name, history
             )
             await update.message.reply_text(reply, parse_mode=None)
-            await _save_history(settings.store_id, history, text, reply)
+            await _save_history(get_active_store(), history, text, reply)
         except Exception as e:
             log.error("Agent failed inside sales state: %s", e, exc_info=True)
             await update.message.reply_text(
@@ -1387,7 +1394,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         return
 
     # ── Priority 2: pending invoice items confirmation ───────────────────────
-    pending_items = await get_state(settings.store_id, _STATE_INVOICE_ITEMS)
+    pending_items = await get_state(get_active_store(), _STATE_INVOICE_ITEMS)
     if pending_items:
         answer = text.strip().upper()
         if answer in ("YES", "Y", "SAVE", "OK", "CONFIRM"):
@@ -1404,17 +1411,17 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
 
                 # Save invoice header
                 invoice_id = await save_invoice(
-                    settings.store_id, vendor, 0, inv_date, inv_num
+                    get_active_store(), vendor, 0, inv_date, inv_num
                 )
                 # Save line items
                 count = await save_invoice_items(
-                    settings.store_id,
+                    get_active_store(),
                     vendor,
                     pending_items.get("items", []),
                     inv_date,
                     invoice_id,
                 )
-                await clear_state(settings.store_id, _STATE_INVOICE_ITEMS)
+                await clear_state(get_active_store(), _STATE_INVOICE_ITEMS)
                 await update.message.reply_text(
                     f"✅ Saved {count} items from {vendor} invoice ({inv_date}).\n"
                     "Use /price <item> to look up prices anytime.",
@@ -1424,7 +1431,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
                 log.error("Saving invoice items failed: %s", e, exc_info=True)
                 await update.message.reply_text(f"⚠️ Save failed: {e}", parse_mode=None)
         elif answer in ("NO", "N", "DISCARD", "CANCEL"):
-            await clear_state(settings.store_id, _STATE_INVOICE_ITEMS)
+            await clear_state(get_active_store(), _STATE_INVOICE_ITEMS)
             await update.message.reply_text("🗑️ Invoice discarded.", parse_mode=None)
         else:
             await update.message.reply_text(
@@ -1434,7 +1441,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         return
 
     # ── Priority 2.5: daily report draft — collecting missing fields ────────
-    report_draft = await get_state(settings.store_id, _STATE_REPORT_DRAFT)
+    report_draft = await get_state(get_active_store(), _STATE_REPORT_DRAFT)
     if report_draft:
         missing     = report_draft.get("missing", [])
         extracted   = dict(report_draft.get("extracted", {}))
@@ -1490,10 +1497,10 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             # Update draft with what we've got so far
             report_draft["extracted"] = extracted
             report_draft["missing"] = remaining_missing
-            await save_state(settings.store_id, _STATE_REPORT_DRAFT, report_draft)
+            await save_state(get_active_store(), _STATE_REPORT_DRAFT, report_draft)
             return
 
-        await clear_state(settings.store_id, _STATE_REPORT_DRAFT)
+        await clear_state(get_active_store(), _STATE_REPORT_DRAFT)
 
         # All fields now filled — check if we still need lotto_po/lotto_cr
         lotto_po   = extracted.get("lotto_po") or 0
@@ -1510,8 +1517,8 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             sales_for_sheet = dict(sales)
             sales_for_sheet.update(right)
             log_daily_sales(sales_for_sheet)
-            await save_daily_sales(settings.store_id, sales, right)
-            save_daily_report(settings.store_id, sales, right)
+            await save_daily_sales(get_active_store(), sales, right)
+            save_daily_report(get_active_store(), sales, right)
             await update.message.reply_text("✅ Logged to Google Sheets.", parse_mode=None)
         except Exception as e:
             log.error("Sheets logging failed: %s", e, exc_info=True)
@@ -1519,9 +1526,9 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         return
 
     # ── Priority 3: pending order list ──────────────────────────────────────
-    awaiting_order = await get_state(settings.store_id, "awaiting_order")
+    awaiting_order = await get_state(get_active_store(), "awaiting_order")
     if awaiting_order:
-        await clear_state(settings.store_id, "awaiting_order")
+        await clear_state(get_active_store(), "awaiting_order")
         await _process_order(update, text)
         return
 
@@ -1539,11 +1546,11 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         from tools.main_agent import run_agent
 
         # Load conversation history for context
-        history = await _load_history(settings.store_id)
+        history = await _load_history(get_active_store())
 
         # If there's a pending daily report, include its data as context
         # so follow-up questions ("change lotto payout", "what was my card?") work
-        pending_sales = await get_state(settings.store_id, _STATE_SALES)
+        pending_sales = await get_state(get_active_store(), _STATE_SALES)
         question = text
         if pending_sales:
             question = (
@@ -1564,12 +1571,12 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
 
         try:
             reply = await asyncio.get_event_loop().run_in_executor(
-                None, run_agent, question, settings.store_id, owner_name, history
+                None, run_agent, question, get_active_store(), owner_name, history
             )
             await update.message.reply_text(reply, parse_mode=None)
-            asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", reply))
+            asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", reply))
             # Save exchange to history (use original text, not injected context)
-            await _save_history(settings.store_id, history, text, reply)
+            await _save_history(get_active_store(), history, text, reply)
         except Exception as e:
             log.error("Agent failed: %s", e, exc_info=True)
             await update.message.reply_text(f"⚠️ Something went wrong: {e}", parse_mode=None)
@@ -1617,7 +1624,7 @@ async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     from tools.voice import SUPPORTED_LANGUAGES
 
     if not context.args:
-        current = (await get_state(settings.store_id, "language_pref")) or {}
+        current = (await get_state(get_active_store(), "language_pref")) or {}
         lang = current.get("name", "auto (English)")
         lang_list = ", ".join(k.title() for k in SUPPORTED_LANGUAGES if k != "auto")
         await update.message.reply_text(
@@ -1635,7 +1642,7 @@ async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     code = SUPPORTED_LANGUAGES[name]
-    await save_state(settings.store_id, "language_pref", {"name": name.title(), "code": code})
+    await save_state(get_active_store(), "language_pref", {"name": name.title(), "code": code})
     if name == "auto":
         await update.message.reply_text("Language set to auto-detect.", parse_mode=None)
     else:
@@ -1648,17 +1655,17 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     from tools.main_agent import run_agent
 
     sender = update.effective_user.first_name or "Owner"
-    asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, "🎤 Voice message"))
+    asyncio.create_task(log_message(get_active_store(), "telegram", "user", sender, "🎤 Voice message"))
 
     # Onboarding gate
-    if not await is_onboarding_complete(settings.store_id):
+    if not await is_onboarding_complete(get_active_store()):
         await onboarding_start(update, context)
         return
 
     # Get language from user profile (set during onboarding), fall back to legacy pref
-    profile = await get_user_profile(settings.store_id)
+    profile = await get_user_profile(get_active_store())
     lang_code = profile.get("language") or (
-        (await get_state(settings.store_id, "language_pref") or {}).get("code")
+        (await get_state(get_active_store(), "language_pref") or {}).get("code")
     )
     if lang_code == "auto":
         lang_code = None
@@ -1680,10 +1687,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         log.info("Voice transcribed: %s", text[:100])
-        asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, f"🎤 {text}"))
+        asyncio.create_task(log_message(get_active_store(), "telegram", "user", sender, f"🎤 {text}"))
 
         # Check if this is a pending daily sheet response
-        sales = await get_state(settings.store_id, _STATE_SALES)
+        sales = await get_state(get_active_store(), _STATE_SALES)
         if sales:
             right = _parse_right_side(text)
             if right is not None:
@@ -1693,12 +1700,12 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     sales_for_sheet = dict(sales)
                     sales_for_sheet.update(right)
                     log_daily_sales(sales_for_sheet)
-                    await save_daily_sales(settings.store_id, sales, right)
-                    save_daily_report(settings.store_id, sales, right)
+                    await save_daily_sales(get_active_store(), sales, right)
+                    save_daily_report(get_active_store(), sales, right)
                     await update.message.reply_text("Logged to Google Sheets.", parse_mode=None)
                 except Exception as e:
                     await update.message.reply_text(f"Sheets logging failed: {e}", parse_mode=None)
-                await clear_state(settings.store_id, _STATE_SALES)
+                await clear_state(get_active_store(), _STATE_SALES)
                 return
 
         # Otherwise run through unified agent
@@ -1706,8 +1713,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if intent == "daily_fetch":
             await _do_daily_fetch(context.bot, settings.telegram_chat_id)
         else:
-            reply = await asyncio.get_event_loop().run_in_executor(None, run_agent, text, settings.store_id)
-            asyncio.create_task(log_message(settings.store_id, "telegram", "bot", "Bot", reply))
+            reply = await asyncio.get_event_loop().run_in_executor(None, run_agent, text, get_active_store())
+            asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", reply))
 
             # Send voice reply + text reply
             try:
@@ -1841,7 +1848,7 @@ async def _handle_daily_report_photo(update, context, photo_bytes: bytes) -> Non
     must_ask    = result["must_ask"]
     report_date = result["report_date"]
 
-    await clear_state(settings.store_id, _STATE_AWAITING_REPORT)
+    await clear_state(get_active_store(), _STATE_AWAITING_REPORT)
 
     summary = _fmt_ocr_summary(extracted, departments, must_ask, report_date)
 
@@ -1853,7 +1860,7 @@ async def _handle_daily_report_photo(update, context, photo_bytes: bytes) -> Non
             "missing":     must_ask,
             "report_date": str(report_date) if report_date else None,
         }
-        await save_state(settings.store_id, _STATE_REPORT_DRAFT, draft)
+        await save_state(get_active_store(), _STATE_REPORT_DRAFT, draft)
         await update.message.reply_text(
             summary + _prompt_for_missing(must_ask),
             parse_mode=ParseMode.MARKDOWN,
@@ -1867,7 +1874,7 @@ async def _handle_daily_report_photo(update, context, photo_bytes: bytes) -> Non
         "lotto_cr":   extracted.get("lotto_cr") or 0,
         "food_stamp": extracted.get("food_stamp") or 0,
     }
-    await save_state(settings.store_id, _STATE_SALES, sales)
+    await save_state(get_active_store(), _STATE_SALES, sales)
     sheet_msg = _build_complete_sheet(sales, right)
     await update.message.reply_text(
         summary + "\n\n" + sheet_msg
@@ -1882,7 +1889,7 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
     Accepts photos (Telegram-compressed) and documents (full quality, better OCR).
     """
     sender = update.effective_user.first_name or "Owner"
-    asyncio.create_task(log_message(settings.store_id, "telegram", "user", sender, "📸 Sent a photo"))
+    asyncio.create_task(log_message(get_active_store(), "telegram", "user", sender, "📸 Sent a photo"))
 
     try:
         # Download photo bytes first — shared by both flows
@@ -1894,7 +1901,7 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         photo_bytes = bytes(await file.download_as_bytearray())
 
         # ── Manual mode: daily report photo ──────────────────────────────────
-        awaiting_report = await get_state(settings.store_id, _STATE_AWAITING_REPORT)
+        awaiting_report = await get_state(get_active_store(), _STATE_AWAITING_REPORT)
         if awaiting_report:
             await _handle_daily_report_photo(update, context, photo_bytes)
             return
@@ -1932,7 +1939,7 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         # Save to pending state and ask for confirmation
-        await save_state(settings.store_id, _STATE_INVOICE_ITEMS, result)
+        await save_state(get_active_store(), _STATE_INVOICE_ITEMS, result)
         msg = _fmt_extracted_items(result)
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -2032,12 +2039,12 @@ async def _send_invoice_paid_alert(bot: Bot, inv: dict) -> None:
 
 async def _save_txn_message_id(txn_id: int, message_id: int) -> None:
     """Save the Telegram message_id for a bank transaction so we can edit it later."""
-    await save_state(settings.store_id, f"bk_msg_{txn_id}", {"message_id": message_id})
+    await save_state(get_active_store(), f"bk_msg_{txn_id}", {"message_id": message_id})
 
 
 async def _get_txn_message_id(txn_id: int) -> int | None:
     """Retrieve the Telegram message_id for a bank transaction."""
-    state = await get_state(settings.store_id, f"bk_msg_{txn_id}")
+    state = await get_state(get_active_store(), f"bk_msg_{txn_id}")
     return state.get("message_id") if state else None
 
 
@@ -2065,7 +2072,7 @@ async def mark_txn_confirmed_on_telegram(txn_id: int, reconcile_type: str, subca
     except Exception as e:
         log.warning("Failed to update Telegram message for txn %s: %s", txn_id, e)
     finally:
-        await clear_state(settings.store_id, f"bk_msg_{txn_id}")
+        await clear_state(get_active_store(), f"bk_msg_{txn_id}")
 
 
 async def send_bank_review_request(bot: Bot, txn: dict) -> None:
@@ -2082,7 +2089,7 @@ async def send_bank_review_request(bot: Bot, txn: dict) -> None:
         entry_date = sheet_match["entry_date"]
         match_type = sheet_match["match_type"]
         # Save match details in DB state so callback can retrieve them
-        await save_state(settings.store_id, f"bank_match_{txn['id']}", {
+        await save_state(get_active_store(), f"bank_match_{txn['id']}", {
             "match_type": match_type,
             "vendor":     vendor,
             "entry_date": str(entry_date),
@@ -2325,7 +2332,7 @@ async def _send_stale_review_reminder(bot: Bot) -> None:
             select(func.count())
             .select_from(BankTransaction)
             .where(
-                BankTransaction.store_id == settings.store_id,
+                BankTransaction.store_id == get_active_store(),
                 BankTransaction.review_status == "needs_review",
                 BankTransaction.transaction_date <= cutoff,
             )
@@ -2350,7 +2357,7 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     data     = query.data
-    store_id = settings.store_id
+    store_id = get_active_store()
 
     # ── CC settlement manual resolve ──────────────────────────────────────────
     if data.startswith("cc_resolve:"):
@@ -2511,7 +2518,7 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     _, reconcile_type, txn_id_str = parts
     txn_id = int(txn_id_str)
-    store_id = settings.store_id
+    store_id = get_active_store()
 
     # For known types that have fixed subcategory lists, show a button keyboard
     if reconcile_type in ("invoice", "expense", "rebate", "payroll"):
@@ -2561,7 +2568,7 @@ async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/bank — show bank balance and recent transactions, or prompt to connect."""
     from tools.plaid_tools import is_connected, fetch_accounts, get_recent_transactions, sync_transactions
 
-    connected = await is_connected(settings.store_id)
+    connected = await is_connected(get_active_store())
 
     if not connected:
         await update.message.reply_text(
@@ -2577,7 +2584,7 @@ async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Sync first, then show
     await update.message.reply_text("🔄 Syncing bank transactions...", parse_mode=None)
     try:
-        result = await sync_transactions(settings.store_id)
+        result = await sync_transactions(get_active_store())
         accounts      = result.get("accounts", [])
         added         = result.get("added", 0)
         matched       = result.get("matched", 0)
@@ -2598,7 +2605,7 @@ async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         balance_lines = "  (no accounts)"
 
     # Recent transactions (last 7 days)
-    txns = await get_recent_transactions(settings.store_id, days=7)
+    txns = await get_recent_transactions(get_active_store(), days=7)
     if txns:
         txn_lines = "\n".join(
             f"  {'✓' if t['is_matched'] else '·'} {t['date']}  {t['description'][:28]:<28}  ${t['amount']:>8.2f}"
@@ -2630,7 +2637,7 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from tools.sync import run_nightly_sync
     await update.message.reply_text("🔄 Syncing Google Sheets → database...", parse_mode=None)
     try:
-        await run_nightly_sync(settings.store_id)
+        await run_nightly_sync(get_active_store())
         await update.message.reply_text("✅ Sync complete. You can now query sales, expenses, and more.", parse_mode=None)
     except Exception as e:
         log.error("Manual sync failed: %s", e, exc_info=True)
@@ -2661,7 +2668,7 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     token = context.args[0].strip()
-    await save_cached_token(settings.store_id, token)
+    await save_cached_token(get_active_store(), token)
     await update.message.reply_text(
         f"✅ NRS token saved. Send /daily to test it.",
         parse_mode=None,

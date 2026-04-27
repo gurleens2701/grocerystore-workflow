@@ -53,10 +53,14 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
 def resolve_store(store_id: Optional[str], user: dict) -> str:
     """Validate requested store_id is in the user's allowed list. Default to first."""
-    allowed: list[str] = user.get("store_ids", [settings.store_id])
-    sid = store_id or (allowed[0] if allowed else settings.store_id)
+    from config.store_context import set_active_store
+    allowed: list[str] = user.get("store_ids") or []
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No store access for this user")
+    sid = store_id or allowed[0]
     if sid not in allowed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied for this store")
+    set_active_store(sid)
     return sid
 
 
@@ -270,10 +274,15 @@ async def get_settings(
     store_id: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
+    from config.store_context import get_store_sheet_id
     sid = resolve_store(store_id, user)
+    try:
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{get_store_sheet_id(sid)}"
+    except RuntimeError:
+        sheet_url = ""
     return {
         "store_name": sid.replace("_", " ").title(),
-        "google_sheet_url": f"https://docs.google.com/spreadsheets/d/{settings.google_sheet_id}",
+        "google_sheet_url": sheet_url,
     }
 
 

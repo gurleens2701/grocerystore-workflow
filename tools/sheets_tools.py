@@ -36,6 +36,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from config.settings import settings
+from config.store_context import get_store_sheet_id
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -484,7 +485,7 @@ def get_daily_sheet_column(store_id: str, field_name: str) -> int | None:
 def log_daily_sales(sales_data: dict[str, Any]) -> str:
     target_date = date.fromisoformat(sales_data.get("date", str(date.today())))
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, target_date)
 
     dept_vals: dict[str, float] = {}
@@ -557,7 +558,7 @@ def log_cogs_entry(
         label = exact_vendor
 
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
     # Row = COGS_DATA_START + (day - 1)
@@ -582,7 +583,7 @@ def mark_invoice_paid(vendor: str, entry_date: date) -> str:
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
 
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
     # Green background = bank confirmed payment
@@ -649,7 +650,7 @@ def log_expense(category: str, amount: float, entry_date: date | None = None) ->
     col_idx = EXPENSES_HEADERS.index(col_name) + 1  # 1-based
 
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
     target_row = _EXP_DATA_START + entry_date.day - 1
@@ -685,7 +686,7 @@ def log_payroll(employee: str, amount: float, entry_date: date | None = None) ->
     col_idx = _PAYROLL_COL_START + local_idx
 
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
     target_row = _EXP_DATA_START + entry_date.day - 1
@@ -745,7 +746,7 @@ def log_rebate(vendor: str, amount: float, entry_date: date | None = None) -> st
     col_idx = REBATES_HEADERS.index(col_name) + 1  # 1-based (starts at col A = 1)
 
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
     target_row = _REV_DATA_START + entry_date.day - 1
@@ -792,7 +793,7 @@ def log_revenue(category: str, amount: float, entry_date: date | None = None) ->
     col_idx = _PROFIT_COL_START + PROFIT_HEADERS.index(col_name)
 
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
     target_row = _REV_DATA_START + entry_date.day - 1
@@ -854,7 +855,7 @@ def find_cogs_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tupl
         return None
     col_idx = _VENDOR_COL_INDEX[exact_vendor]
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     today = date.today()
 
     for month_start in _months_to_check(days_back):
@@ -881,7 +882,7 @@ def find_cogs_by_amount(amount: float, days_back: int = 14) -> list[tuple[date, 
     Returns list of (entry_date, vendor_col, cell_amount), most recent first, capped at 3.
     """
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     today = date.today()
     matches: list[tuple[date, str, float]] = []
 
@@ -919,7 +920,7 @@ def find_expense_by_category(category: str, amount: float, days_back: int = 14) 
         return None
     col_idx = EXPENSES_HEADERS.index(col_name) + 1
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     today = date.today()
 
     for month_start in _months_to_check(days_back):
@@ -946,7 +947,7 @@ def find_expense_by_amount(amount: float, days_back: int = 14) -> list[tuple[dat
     Returns list of (entry_date, col_name, cell_amount), most recent first, capped at 3.
     """
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     today = date.today()
     matches: list[tuple[date, str, float]] = []
 
@@ -985,7 +986,7 @@ def find_rebate_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tu
         return None
     col_idx = REBATES_HEADERS.index(col_name) + 1
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     today = date.today()
 
     for month_start in _months_to_check(days_back):
@@ -1015,7 +1016,7 @@ def mark_expense_paid(category: str, entry_date: date) -> str:
     target_row = _EXP_DATA_START + entry_date.day - 1
     cell       = gspread.utils.rowcol_to_a1(target_row, col_idx)
     client     = _get_client()
-    sheet      = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+    sheet      = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
     sheet.format(cell, {"backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}})
     return f"Marked PAID: {col_name} expense on {entry_date}"
 
@@ -1032,7 +1033,7 @@ def mark_cc_settled(sale_date: date, bank_deposit: float, bank_date: date) -> st
     cell = gspread.utils.rowcol_to_a1(target_row, credit_idx)
 
     client = _get_client()
-    spreadsheet = client.open_by_key(settings.google_sheet_id)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, sale_date)
 
     # Green background
@@ -1056,7 +1057,7 @@ def mark_rebate_paid(vendor: str, entry_date: date) -> str:
     target_row = _REV_DATA_START + entry_date.day - 1
     cell       = gspread.utils.rowcol_to_a1(target_row, col_idx)
     client     = _get_client()
-    sheet      = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+    sheet      = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
     sheet.format(cell, {"backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}})
     return f"Marked PAID: {col_name} rebate on {entry_date}"
 
@@ -1091,7 +1092,7 @@ def log_expense_and_highlight(category: str, amount: float, entry_date: date) ->
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
 
     client = _get_client()
-    sheet = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+    sheet = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
 
     existing = _read_cell_value(sheet, cell)
     if existing is None:
@@ -1117,7 +1118,7 @@ def log_invoice_and_highlight(vendor: str, amount: float, entry_date: date) -> s
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
 
     client = _get_client()
-    sheet = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+    sheet = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
 
     existing = _read_cell_value(sheet, cell)
     if existing is None:
@@ -1142,7 +1143,7 @@ def log_rebate_and_highlight(vendor: str, amount: float, entry_date: date) -> st
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
 
     client = _get_client()
-    sheet = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+    sheet = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
 
     existing = _read_cell_value(sheet, cell)
     if existing is None:
@@ -1170,7 +1171,7 @@ def log_payroll_and_highlight(employee: str, amount: float, entry_date: date) ->
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
 
     client = _get_client()
-    sheet = _get_or_create_monthly_tab(client.open_by_key(settings.google_sheet_id), entry_date)
+    sheet = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
 
     existing = _read_cell_value(sheet, cell)
     if existing is None:

@@ -16,6 +16,7 @@ from sqlalchemy import and_, select
 from config.settings import settings
 from db.database import get_sync_session
 from db.models import DailySales, Expense, Invoice, InvoiceItem, Rebate, Revenue
+from config.store_context import get_active_store
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +30,7 @@ def query_sales(days: int = 30) -> str:
     with get_sync_session() as session:
         rows = session.execute(
             select(DailySales)
-            .where(and_(DailySales.store_id == settings.store_id, DailySales.sale_date >= since))
+            .where(and_(DailySales.store_id == get_active_store(), DailySales.sale_date >= since))
             .order_by(DailySales.sale_date.desc())
         ).scalars().all()
     data = [
@@ -49,7 +50,7 @@ def query_expenses(days: int = 30, category: str = "") -> str:
     since = date.today() - timedelta(days=days)
     with get_sync_session() as session:
         stmt = select(Expense).where(
-            and_(Expense.store_id == settings.store_id, Expense.expense_date >= since)
+            and_(Expense.store_id == get_active_store(), Expense.expense_date >= since)
         )
         if category:
             stmt = stmt.where(Expense.category.ilike(f"%{category}%"))
@@ -64,7 +65,7 @@ def query_invoices(days: int = 365, vendor: str = "") -> str:
     since = date.today() - timedelta(days=days)
     with get_sync_session() as session:
         stmt = select(Invoice).where(
-            and_(Invoice.store_id == settings.store_id, Invoice.invoice_date >= since)
+            and_(Invoice.store_id == get_active_store(), Invoice.invoice_date >= since)
         )
         if vendor:
             stmt = stmt.where(Invoice.vendor.ilike(f"%{vendor}%"))
@@ -80,7 +81,7 @@ def query_rebates(days: int = 30) -> str:
     with get_sync_session() as session:
         rows = session.execute(
             select(Rebate)
-            .where(and_(Rebate.store_id == settings.store_id, Rebate.rebate_date >= since))
+            .where(and_(Rebate.store_id == get_active_store(), Rebate.rebate_date >= since))
             .order_by(Rebate.rebate_date.desc())
         ).scalars().all()
     data = [{"date": str(r.rebate_date), "vendor": r.vendor, "amount": float(r.amount)} for r in rows]
@@ -94,7 +95,7 @@ def query_revenue(days: int = 30) -> str:
     with get_sync_session() as session:
         rows = session.execute(
             select(Revenue)
-            .where(and_(Revenue.store_id == settings.store_id, Revenue.revenue_date >= since))
+            .where(and_(Revenue.store_id == get_active_store(), Revenue.revenue_date >= since))
             .order_by(Revenue.revenue_date.desc())
         ).scalars().all()
     data = [{"date": str(r.revenue_date), "category": r.category, "amount": float(r.amount)} for r in rows]
@@ -113,7 +114,7 @@ def query_vendors() -> str:
                 func.max(Invoice.invoice_date).label("last_date"),
                 func.count(Invoice.id).label("invoice_count"),
             )
-            .where(Invoice.store_id == settings.store_id)
+            .where(Invoice.store_id == get_active_store())
             .group_by(Invoice.vendor)
             .order_by(func.sum(Invoice.amount).desc())
         ).fetchall()
@@ -121,7 +122,7 @@ def query_vendors() -> str:
         item_vendors = session.execute(
             select(InvoiceItem.vendor, func.count(InvoiceItem.id).label("item_count"),
                    func.max(InvoiceItem.invoice_date).label("last_date"))
-            .where(InvoiceItem.store_id == settings.store_id)
+            .where(InvoiceItem.store_id == get_active_store())
             .group_by(InvoiceItem.vendor)
             .order_by(func.count(InvoiceItem.id).desc())
         ).fetchall()
@@ -145,7 +146,7 @@ def query_prices(product: str) -> str:
         stmt = select(
             InvoiceItem.item_name, InvoiceItem.canonical_name,
             InvoiceItem.unit_price, InvoiceItem.vendor, InvoiceItem.invoice_date,
-        ).where(InvoiceItem.store_id == settings.store_id)
+        ).where(InvoiceItem.store_id == get_active_store())
         if words:
             conditions = [
                 (InvoiceItem.canonical_name.ilike(f"%{w}%") | InvoiceItem.item_name.ilike(f"%{w}%"))

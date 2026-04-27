@@ -20,6 +20,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from db.state import get_state, save_state
 from config.settings import settings
+from config.store_context import get_active_store
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ async def onboarding_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     answer = update.message.text.strip().lower()
     bank_linked = "yes" in answer or answer == "y"
 
-    store_id  = settings.store_id
+    store_id  = get_active_store()
     name      = context.user_data.get("onboarding_name", "there")
     lang      = context.user_data.get("onboarding_lang", "auto")
 

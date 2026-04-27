@@ -26,6 +26,7 @@ import httpx
 from playwright.async_api import async_playwright
 
 from config.settings import settings
+from config.store_context import get_active_store
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ def clear_cached_token_sync(store_id: str) -> None:
 
 async def _get_token() -> str:
     """Return a valid NRS session token (cached or via Playwright login)."""
-    token = get_cached_token(settings.store_id)
+    token = get_cached_token(get_active_store())
     if token:
         log.info("Using cached NRS token.")
         return token
@@ -199,7 +200,7 @@ async def fetch_raw_stats(target_date: date) -> dict[str, Any]:
             return r.json().get("data", {})
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            clear_cached_token_sync(settings.store_id)
+            clear_cached_token_sync(get_active_store())
             raise NRSTokenExpiredError(
                 "NRS session expired. Send /token <value> in Telegram to set a new one."
             ) from e
@@ -217,7 +218,7 @@ async def fetch_raw_inventory() -> dict[str, Any]:
             return r.json().get("merchant", {})
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            clear_cached_token_sync(settings.store_id)
+            clear_cached_token_sync(get_active_store())
             raise NRSTokenExpiredError(
                 "NRS session expired. Send /token <value> in Telegram to set a new one."
             ) from e

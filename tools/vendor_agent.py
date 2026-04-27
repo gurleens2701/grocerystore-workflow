@@ -19,6 +19,7 @@ from sqlalchemy import and_, func, select
 from config.settings import settings
 from db.database import get_async_session
 from db.models import VendorPrice
+from config.store_context import get_active_store
 
 
 async def _get_vendor_summary(store_id: str, category: str | None, days: int) -> list[dict]:
@@ -93,7 +94,7 @@ def get_vendor_comparison(category: str | None = None, days: int = 90) -> str:
     Return a formatted vendor price comparison.
     Blocking — call via run_in_executor from async context.
     """
-    rows = asyncio.run(_get_vendor_summary(settings.store_id, category, days))
+    rows = asyncio.run(_get_vendor_summary(get_active_store(), category, days))
 
     if not rows:
         period = f"last {days} days"

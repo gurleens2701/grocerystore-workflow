@@ -27,6 +27,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from config.settings import settings
 from db.database import get_async_session
 from db.models import DailySales, Expense, Invoice, Rebate, Revenue
+from config.store_context import get_store_sheet_id
 from tools.sheets_tools import (
     COGS_VENDOR_COLS,
     DAILY_HEADERS,
@@ -358,7 +359,7 @@ async def run_nightly_sync(store_id: str) -> None:
 
     try:
         client = _get_client()
-        spreadsheet = client.open_by_key(settings.google_sheet_id)
+        spreadsheet = client.open_by_key(get_store_sheet_id(store_id))
         sheet = _get_or_create_monthly_tab(spreadsheet, today)
 
         import calendar

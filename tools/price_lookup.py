@@ -19,6 +19,7 @@ from sqlalchemy import and_, func, select
 from config.settings import settings
 from db.database import get_async_session, get_session_for_store
 from db.models import InvoiceItem
+from config.store_context import get_active_store
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +139,7 @@ def parse_order_list(text: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 async def _lookup_item_price_async(item_query: str, store_id: str | None = None) -> str:
-    sid = store_id or settings.store_id
+    sid = store_id or get_active_store()
     words = item_query.strip().split()
     if not words:
         return "Please provide an item name to search for."
@@ -208,7 +209,7 @@ async def _compile_order_async(item_list: list[dict], store_id: str | None = Non
     Build a per-vendor total. Show cheapest vendor, flag missing items per vendor.
     Suggest split order if cheapest vendor is missing items.
     """
-    sid = store_id or settings.store_id
+    sid = store_id or get_active_store()
     if not item_list:
         return "No items provided."
 

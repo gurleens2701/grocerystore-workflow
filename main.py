@@ -84,6 +84,9 @@ def _make_workflow_runner(store_id: str, job_name: str, app):
 
 async def _dispatch_workflow(store_id: str, job_name: str, app) -> None:
     """Route a job_name to the correct workflow function for the given store."""
+    from config.store_context import set_active_store
+    set_active_store(store_id)
+
     if job_name == "daily_fetch":
         await scheduled_daily_for_store(store_id, app)
 
