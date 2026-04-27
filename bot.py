@@ -516,7 +516,7 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
             sales = await dispatch_fetch(store, parsed_date)
         else:
             # Fallback: use legacy nrs_tools directly
-            sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales, target_date)
+            sales = await asyncio.to_thread(fetch_daily_sales, target_date)
 
         await save_state(get_active_store(), _STATE_SALES, sales)
 
@@ -640,7 +640,7 @@ async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ]
         log_transactions(txns, sales["date"])
 
-        inv = await asyncio.get_event_loop().run_in_executor(None, fetch_inventory)
+        inv = await asyncio.to_thread(fetch_inventory)
         log_inventory(inv)
 
         await update.message.reply_text("✅ Logged to Google Sheets.", parse_mode=None)
@@ -1016,7 +1016,7 @@ async def cmd_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    parsed = await asyncio.get_event_loop().run_in_executor(None, _extract_invoice_fields, text)
+    parsed = await asyncio.to_thread(_extract_invoice_fields, text)
     if not parsed:
         await update.message.reply_text(
             "⚠️ Could not parse. Try: /invoice Heidelburg 500 3/9", parse_mode=None
@@ -1041,8 +1041,7 @@ async def cmd_vendors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     category = " ".join(context.args).upper() if context.args else None
     await update.message.reply_text("📊 Pulling vendor price data...", parse_mode=None)
     try:
-        report = await asyncio.get_event_loop().run_in_executor(
-            None, get_vendor_comparison, category
+        report = await asyncio.to_thread(get_vendor_comparison, category
         )
         await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
@@ -1065,8 +1064,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(f"🔍 Looking up {query}...", parse_mode=None)
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lookup_item_price, query
+        result = await asyncio.to_thread(lookup_item_price, query
         )
         await update.message.reply_text(result, parse_mode=None)
     except Exception as e:
@@ -1111,8 +1109,7 @@ async def _process_order(update: Update, text: str) -> None:
         f"🔍 Finding cheapest vendors for {len(items)} items...", parse_mode=None
     )
     try:
-        summary = await asyncio.get_event_loop().run_in_executor(
-            None, compile_order, items
+        summary = await asyncio.to_thread(compile_order, items
         )
         await update.message.reply_text(summary, parse_mode=None)
     except Exception as e:
@@ -1217,7 +1214,7 @@ async def _handle_revenue(update: Update, text: str) -> None:
 
 
 async def _handle_invoice_text(update: Update, text: str) -> None:
-    parsed = await asyncio.get_event_loop().run_in_executor(None, _extract_invoice_fields, text)
+    parsed = await asyncio.to_thread(_extract_invoice_fields, text)
     if not parsed:
         await update.message.reply_text("⚠️ Could not parse invoice. Try: mclane $2100 3/14", parse_mode=None)
         return
@@ -1360,8 +1357,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             return
 
         # ── Natural language edit ("change card to 1300", "lotto payout 500") ──
-        edits = await asyncio.get_event_loop().run_in_executor(
-            None, _parse_sales_edit, text, sales
+        edits = await asyncio.to_thread(_parse_sales_edit, text, sales
         )
         if edits:
             sales.update(edits)
@@ -1381,8 +1377,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         from tools.main_agent import run_agent
         history = await _load_history(get_active_store())
         try:
-            reply = await asyncio.get_event_loop().run_in_executor(
-                None, run_agent, text, get_active_store(), owner_name, history
+            reply = await asyncio.to_thread(run_agent, text, get_active_store(), owner_name, history
             )
             await update.message.reply_text(reply, parse_mode=None)
             await _save_history(get_active_store(), history, text, reply)
@@ -1570,8 +1565,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             )
 
         try:
-            reply = await asyncio.get_event_loop().run_in_executor(
-                None, run_agent, question, get_active_store(), owner_name, history
+            reply = await asyncio.to_thread(run_agent, question, get_active_store(), owner_name, history
             )
             await update.message.reply_text(reply, parse_mode=None)
             asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", reply))
@@ -1678,8 +1672,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         audio_bytes = bytes(await file.download_as_bytearray(read_timeout=60, write_timeout=60, connect_timeout=30))
 
         # Transcribe
-        text = await asyncio.get_event_loop().run_in_executor(
-            None, transcribe_voice, audio_bytes, lang_code
+        text = await asyncio.to_thread(transcribe_voice, audio_bytes, lang_code
         )
 
         if not text:
@@ -1713,14 +1706,13 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if intent == "daily_fetch":
             await _do_daily_fetch(context.bot, settings.telegram_chat_id)
         else:
-            reply = await asyncio.get_event_loop().run_in_executor(None, run_agent, text, get_active_store())
+            reply = await asyncio.to_thread(run_agent, text, get_active_store())
             asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", reply))
 
             # Send voice reply + text reply
             try:
                 from tools.voice import text_to_speech
-                audio = await asyncio.get_event_loop().run_in_executor(
-                    None, text_to_speech, reply
+                audio = await asyncio.to_thread(text_to_speech, reply
                 )
                 await update.message.reply_voice(voice=io.BytesIO(audio))
             except Exception as tts_err:
@@ -1831,8 +1823,7 @@ async def _handle_daily_report_photo(update, context, photo_bytes: bytes) -> Non
     await update.message.reply_text("📋 Reading your POS report...", parse_mode=None)
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, extract_daily_report_from_photo, photo_bytes
+        result = await asyncio.to_thread(extract_daily_report_from_photo, photo_bytes
         )
     except Exception as e:
         log.error("Daily report OCR failed: %s", e, exc_info=True)
@@ -1908,8 +1899,7 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
 
         await update.message.reply_text("📸 Reading invoice, this may take a few seconds...", parse_mode=None)
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, extract_invoice_from_photo, photo_bytes
+        result = await asyncio.to_thread(extract_invoice_from_photo, photo_bytes
         )
 
         if result.get("error"):

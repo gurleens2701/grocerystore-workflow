@@ -364,7 +364,7 @@ async def process_message(text: str, store_id: str) -> str:
 
     if lower.startswith("/daily"):
         try:
-            sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales)
+            sales = await asyncio.to_thread(fetch_daily_sales)
             await save_state(store_id, _STATE_SALES, sales)
             return _fmt_left(sales) + _prompt_for_right_side()
         except Exception as e:
@@ -395,7 +395,7 @@ async def process_message(text: str, store_id: str) -> str:
     if lower.startswith("/vendors"):
         category = text[8:].strip().upper() or None
         try:
-            return await asyncio.get_event_loop().run_in_executor(None, get_vendor_comparison, category)
+            return await asyncio.to_thread(get_vendor_comparison, category)
         except Exception as e:
             return f"⚠️ Error: {e}"
 
@@ -476,12 +476,12 @@ async def process_message(text: str, store_id: str) -> str:
         return await _compile_order_async(items, store_id=store_id)
 
     # ── Priority 4: daily fetch starts the state machine; everything else → unified agent ──
-    intent = await asyncio.get_event_loop().run_in_executor(None, classify_message, text)
+    intent = await asyncio.to_thread(classify_message, text)
     log.info("Web chat intent: %s | %s", intent, text[:60])
 
     if intent == "daily_fetch":
         try:
-            sales = await asyncio.get_event_loop().run_in_executor(None, fetch_daily_sales)
+            sales = await asyncio.to_thread(fetch_daily_sales)
             await save_state(store_id, _STATE_SALES, sales)
             return _fmt_left(sales) + _prompt_for_right_side()
         except Exception as e:
@@ -490,7 +490,7 @@ async def process_message(text: str, store_id: str) -> str:
     else:
         from tools.main_agent import run_agent
         try:
-            return await asyncio.get_event_loop().run_in_executor(None, run_agent, text, store_id)
+            return await asyncio.to_thread(run_agent, text, store_id)
         except Exception as e:
             log.error("Agent failed: %s", e, exc_info=True)
             return f"⚠️ Something went wrong: {e}"
@@ -537,7 +537,7 @@ async def _handle_revenue_web(text: str, store_id: str) -> str:
 
 
 async def _handle_invoice_text_web(text: str, store_id: str) -> str:
-    parsed = await asyncio.get_event_loop().run_in_executor(None, _extract_invoice_fields, text)
+    parsed = await asyncio.to_thread(_extract_invoice_fields, text)
     if not parsed:
         return "⚠️ Could not parse. Try: mclane $2100 3/14"
 

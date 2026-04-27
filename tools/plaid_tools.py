@@ -104,7 +104,7 @@ def _create_link_token_sync(store_id: str) -> str:
 
 
 async def create_link_token(store_id: str) -> str:
-    return await asyncio.get_event_loop().run_in_executor(None, _create_link_token_sync, store_id)
+    return await asyncio.to_thread(_create_link_token_sync, store_id)
 
 
 # ── Exchange public token (step 2 of connect flow) ───────────────────────────
@@ -117,7 +117,7 @@ async def exchange_public_token(store_id: str, public_token: str) -> dict:
         )
         return resp["access_token"], resp["item_id"]
 
-    access_token, item_id = await asyncio.get_event_loop().run_in_executor(None, _exchange)
+    access_token, item_id = await asyncio.to_thread(_exchange)
 
     # Prime the cursor — advance past all historical transactions so new users
     # only get transactions from enrollment day forward (not 90 days of history).
@@ -135,7 +135,7 @@ async def exchange_public_token(store_id: str, public_token: str) -> dict:
         return cursor
 
     try:
-        initial_cursor = await asyncio.get_event_loop().run_in_executor(None, _prime_cursor)
+        initial_cursor = await asyncio.to_thread(_prime_cursor)
         log.info("Plaid cursor primed for store=%s — historical transactions skipped", store_id)
     except Exception as e:
         log.warning("Cursor priming failed for store=%s: %s — will sync 90 days on first sync", store_id, e)
@@ -171,8 +171,7 @@ async def fetch_accounts(store_id: str) -> list[dict]:
     creds = await _get_creds(store_id)
     if not creds:
         return []
-    return await asyncio.get_event_loop().run_in_executor(
-        None, _get_accounts_sync, creds["access_token"]
+    return await asyncio.to_thread(_get_accounts_sync, creds["access_token"]
     )
 
 
@@ -228,8 +227,7 @@ async def sync_transactions(store_id: str) -> dict:
     connected_at_str = creds.get("connected_at")
     cutoff = date.fromisoformat(connected_at_str) if connected_at_str else None
 
-    raw_txns, next_cursor = await asyncio.get_event_loop().run_in_executor(
-        None, _sync_plaid_blocking, access_token, cursor
+    raw_txns, next_cursor = await asyncio.to_thread(_sync_plaid_blocking, access_token, cursor
     )
 
     added_count = 0
@@ -354,8 +352,7 @@ async def match_transactions(store_id: str) -> dict:
                 try:
                     from tools.sheets_tools import mark_invoice_paid
                     import asyncio as _aio
-                    await _aio.get_event_loop().run_in_executor(
-                        None, mark_invoice_paid, invoice.vendor, invoice.invoice_date
+                    await asyncio.to_thread(mark_invoice_paid, invoice.vendor, invoice.invoice_date
                     )
                 except Exception as _e:
                     log.warning("mark_invoice_paid failed for %s: %s", invoice.vendor, _e)

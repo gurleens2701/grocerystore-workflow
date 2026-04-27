@@ -200,19 +200,19 @@ async def _match_to_sheet(description: str, amount: float) -> dict | None:
         # Money IN — look in rebate section by vendor name
         rebate_col = match_description_to_rebate(description)
         if rebate_col:
-            match = await loop.run_in_executor(None, find_rebate_by_vendor, rebate_col, abs_amount)
+            match = await asyncio.to_thread(find_rebate_by_vendor, rebate_col, abs_amount)
             if match:
                 return {"match_type": "rebate", "vendor": rebate_col,
                         "entry_date": match[0], "proposed": False}
 
     elif is_check:
         # CHECK with no vendor name — search COGS then expenses by amount
-        cogs_hits = await loop.run_in_executor(None, find_cogs_by_amount, abs_amount)
+        cogs_hits = await asyncio.to_thread(find_cogs_by_amount, abs_amount)
         if cogs_hits:
             best = cogs_hits[0]
             return {"match_type": "invoice", "vendor": best[1],
                     "entry_date": best[0], "sheet_amount": best[2], "proposed": True}
-        exp_hits = await loop.run_in_executor(None, find_expense_by_amount, abs_amount)
+        exp_hits = await asyncio.to_thread(find_expense_by_amount, abs_amount)
         if exp_hits:
             best = exp_hits[0]
             return {"match_type": "expense", "vendor": best[1],
@@ -222,14 +222,14 @@ async def _match_to_sheet(description: str, amount: float) -> dict | None:
         # ACH with vendor name — check COGS first, then expenses
         cogs_vendor = match_description_to_cogs_vendor(description)
         if cogs_vendor:
-            match = await loop.run_in_executor(None, find_cogs_by_vendor, cogs_vendor, abs_amount)
+            match = await asyncio.to_thread(find_cogs_by_vendor, cogs_vendor, abs_amount)
             if match:
                 return {"match_type": "invoice", "vendor": cogs_vendor,
                         "entry_date": match[0], "proposed": False}
 
         exp_col = match_description_to_expense(description)
         if exp_col:
-            match = await loop.run_in_executor(None, find_expense_by_category, exp_col, abs_amount)
+            match = await asyncio.to_thread(find_expense_by_category, exp_col, abs_amount)
             if match:
                 return {"match_type": "expense", "vendor": exp_col,
                         "entry_date": match[0], "proposed": False}
@@ -248,11 +248,11 @@ async def _highlight_sheet_match(sheet_match: dict) -> None:
     entry_date = sheet_match["entry_date"]
     try:
         if match_type == "invoice":
-            await loop.run_in_executor(None, mark_invoice_paid, vendor, entry_date)
+            await asyncio.to_thread(mark_invoice_paid, vendor, entry_date)
         elif match_type == "expense":
-            await loop.run_in_executor(None, mark_expense_paid, vendor, entry_date)
+            await asyncio.to_thread(mark_expense_paid, vendor, entry_date)
         elif match_type == "rebate":
-            await loop.run_in_executor(None, mark_rebate_paid, vendor, entry_date)
+            await asyncio.to_thread(mark_rebate_paid, vendor, entry_date)
     except Exception as e:
         log.warning("Sheet highlight failed for %s/%s: %s", match_type, vendor, e)
 
@@ -626,8 +626,7 @@ async def _auto_log(
         # Write to Google Sheet (log if empty) + highlight green
         try:
             from tools.sheets_tools import log_expense_and_highlight
-            result = await loop.run_in_executor(
-                None, log_expense_and_highlight, label, float_amount, txn_date
+            result = await asyncio.to_thread(log_expense_and_highlight, label, float_amount, txn_date
             )
             log.info("Sheet: %s", result)
         except Exception as e:
@@ -660,8 +659,7 @@ async def _auto_log(
         # Write to Google Sheet (log COGS if empty) + highlight green
         try:
             from tools.sheets_tools import log_invoice_and_highlight
-            result = await loop.run_in_executor(
-                None, log_invoice_and_highlight, vendor_label, float_amount, txn_date
+            result = await asyncio.to_thread(log_invoice_and_highlight, vendor_label, float_amount, txn_date
             )
             log.info("Sheet: %s", result)
         except Exception as e:
@@ -694,8 +692,7 @@ async def _auto_log(
         # Write to Google Sheet (log if empty) + highlight green
         try:
             from tools.sheets_tools import log_rebate_and_highlight
-            result = await loop.run_in_executor(
-                None, log_rebate_and_highlight, vendor_label, float_amount, txn_date
+            result = await asyncio.to_thread(log_rebate_and_highlight, vendor_label, float_amount, txn_date
             )
             log.info("Sheet: %s", result)
         except Exception as e:
@@ -706,8 +703,7 @@ async def _auto_log(
         try:
             from tools.sheets_tools import log_payroll_and_highlight
             employee_label = subcategory or description[:64]
-            result = await loop.run_in_executor(
-                None, log_payroll_and_highlight, employee_label, float_amount, txn_date
+            result = await asyncio.to_thread(log_payroll_and_highlight, employee_label, float_amount, txn_date
             )
             log.info("Sheet: %s", result)
         except Exception as e:
@@ -907,8 +903,7 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
                     from tools.sheets_tools import mark_cc_settled
                     loop = asyncio.get_event_loop()
                     for r in matched_rows:
-                        await loop.run_in_executor(
-                            None, mark_cc_settled, r.sale_date, float(r.card), dep_date,
+                        await asyncio.to_thread(mark_cc_settled, r.sale_date, float(r.card), dep_date,
                         )
                     log.info("CC settled: bank $%.2f on %s → %s total $%.2f (diff $%.2f)%s",
                              bank_amount, dep_date, range_label, total, diff,
@@ -1033,8 +1028,7 @@ async def settle_cc_days_with_deposit(
         from tools.sheets_tools import mark_cc_settled
         loop = asyncio.get_event_loop()
         for r in rows:
-            await loop.run_in_executor(
-                None, mark_cc_settled, r.sale_date, float(r.card), dep_date,
+            await asyncio.to_thread(mark_cc_settled, r.sale_date, float(r.card), dep_date,
             )
     except Exception as e:
         log.warning("Sheet highlight after cc_pick failed: %s", e)
