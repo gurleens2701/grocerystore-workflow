@@ -83,9 +83,6 @@ from tools.sheets_tools import (
 
 log = logging.getLogger(__name__)
 
-# Conversation state
-AWAITING_RIGHT_SIDE = 1
-
 # PostgreSQL state keys
 _STATE_SALES = "sales"
 _STATE_INVOICE_ITEMS = "invoice_items"   # pending extracted line items awaiting user confirmation
@@ -588,127 +585,26 @@ async def _do_manual_daily_prompt(bot: Bot, chat_id: str) -> None:
     await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle /daily command — triggers fetch (NRS) or photo prompt (manual mode)."""
+async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /daily — fetch POS data and send the daily sheet. State (_STATE_SALES)
+    is managed in DB by _do_daily_fetch; the general message handler picks up
+    subsequent replies. Plain command, no ConversationHandler."""
     sid = get_active_store()
     chat_id = str(update.effective_chat.id)
     profile = await get_user_profile(sid)
     if profile.get("backoffice") == "manual":
         await _do_manual_daily_prompt(context.bot, chat_id)
-        return ConversationHandler.END
+        return
     target_date = _parse_daily_date(" ".join(context.args)) if context.args else ""
-    ok = await _do_daily_fetch(context.bot, chat_id, target_date)
+    await _do_daily_fetch(context.bot, chat_id, target_date)
     # Send current bank balance after the daily sheet — silent if no Plaid.
     await _send_bank_balance(context.bot, sid, chat_id)
-    return AWAITING_RIGHT_SIDE if ok else ConversationHandler.END
 
 
-async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the user's reply with right-side numbers."""
-    text = update.message.text.strip()
-    sales = await get_state(get_active_store(), _STATE_SALES)
-
-    if not sales:
-        await update.message.reply_text(
-            "No pending daily sheet. Send /daily to start.", parse_mode=None
-        )
-        return ConversationHandler.END
-
-    # Load store rules for the parser so it knows which manual fields to expect
-    manual_rules = None
-    all_rules = None
-    store_name = "Store"
-    try:
-        store = await load_store(chat_id=str(update.effective_chat.id))
-        if store:
-            manual_rules = store.get_manual_rules()
-            all_rules = store.daily_report_rules
-            store_name = store.store_name
-    except Exception as _e:
-        log.warning("Could not load rules for right-side parse: %s", _e)
-
-    right = _parse_right_side(text, manual_rules)
-    if right is None:
-        # Three cases when parsing fails — distinguish them so we don't trap
-        # the owner in "please reply with numbers" hell when they're just chatting.
-
-        # Allow the owner to escape the state at any point.
-        clean = text.strip().lower()
-        if clean in ("cancel", "nevermind", "never mind", "stop", "exit", "quit", "abort"):
-            await clear_state(get_active_store(), _STATE_SALES)
-            await update.message.reply_text(
-                "Daily report cancelled. What do you need?", parse_mode=None,
-            )
-            return ConversationHandler.END
-
-        digits = re.findall(r"\d+\.?\d*", text)
-        if digits and not any(
-            re.search(re.escape(r.label.lower()), text.lower()) or
-            re.search(re.escape(r.field_name.replace("_", " ")), text.lower())
-            for r in (manual_rules or [])
-        ):
-            # Numbers without labels — ambiguous. Ask for the labeled format.
-            hint = "\n".join(f"{r.label}: <number>" for r in (manual_rules or []))
-            await update.message.reply_text(
-                f"I see {len(digits)} numbers but I can't tell which field each is for.\n\n"
-                f"Please reply like this:\n```\n{hint}\n```",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return AWAITING_RIGHT_SIDE
-
-        # No digits at all — owner is asking a question, not entering numbers.
-        # Hand off to the agent and stay in the pending state so they can
-        # come back to entering numbers later.
-        from tools.main_agent import run_agent
-        history = await _load_history(get_active_store())
-        owner_name = (await get_user_profile(get_active_store())).get("name", "")
-        try:
-            reply = await asyncio.to_thread(run_agent, text, get_active_store(), owner_name, history)
-            await update.message.reply_text(reply, parse_mode=None)
-            await _save_history(get_active_store(), history, text, reply)
-        except Exception as e:
-            log.error("Agent failed inside daily-report state: %s", e, exc_info=True)
-            await update.message.reply_text("Sorry, I hit an error. Try again?", parse_mode=None)
-        return AWAITING_RIGHT_SIDE  # daily report still pending, owner can reply with numbers later
-
-    # Send complete daily sheet
-    sheet_msg = _build_complete_sheet(sales, right, rules=all_rules, store_name=store_name)
-    await update.message.reply_text(sheet_msg, parse_mode=ParseMode.MARKDOWN)
-
-    # Log to Google Sheets
-    await update.message.reply_text("📊 Logging to Google Sheets...", parse_mode=None)
-    try:
-        sales_for_sheet = dict(sales)
-        sales_for_sheet.update(right)
-
-        log_daily_sales(sales_for_sheet)
-        await save_daily_sales(get_active_store(), sales, right)
-        save_daily_report(get_active_store(), sales, right)
-
-        txns = [
-            {"type": "sale", "department": d["name"], "items": d["items"],
-             "amount": d["sales"], "payment_method": "mixed", "date": sales["date"]}
-            for d in sales.get("departments", [])
-        ]
-        log_transactions(txns, sales["date"])
-
-        inv = await asyncio.to_thread(fetch_inventory)
-        log_inventory(inv)
-
-        await update.message.reply_text("✅ Logged to Google Sheets.", parse_mode=None)
-    except Exception as e:
-        log.error("Sheets logging failed: %s", e, exc_info=True)
-        await update.message.reply_text(f"⚠️ Sheets logging failed: {e}", parse_mode=None)
-
-    await clear_state(get_active_store(), _STATE_SALES)
-    return ConversationHandler.END
-
-
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancel the current conversation."""
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel pending daily report. Falls back to a no-op if nothing pending."""
     await clear_state(get_active_store(), _STATE_SALES)
     await update.message.reply_text("Cancelled.", parse_mode=None)
-    return ConversationHandler.END
 
 
 # ---------------------------------------------------------------------------
@@ -2810,20 +2706,13 @@ def build_app() -> Application:
         allow_reentry=True,
     )
 
-    # Daily sales conversation
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("daily", cmd_daily)],
-        states={
-            AWAITING_RIGHT_SIDE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_right_side)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cmd_cancel)],
-        allow_reentry=True,
-    )
-
+    # Daily report — plain command handler. State (_STATE_SALES in DB) is the
+    # source of truth; the message handler in handle_text reads it and routes
+    # appropriately. No ConversationHandler — it caused two competing handlers
+    # for the same messages, which broke owner Q&A while a report was pending.
     app.add_handler(onboarding_conv)
-    app.add_handler(conv)
+    app.add_handler(CommandHandler("daily", cmd_daily))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("invoice", cmd_invoice))
     app.add_handler(CommandHandler("vendors", cmd_vendors))
