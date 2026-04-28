@@ -593,12 +593,16 @@ async def _do_manual_daily_prompt(bot: Bot, chat_id: str) -> None:
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /daily command — triggers fetch (NRS) or photo prompt (manual mode)."""
-    profile = await get_user_profile(get_active_store())
+    sid = get_active_store()
+    chat_id = str(update.effective_chat.id)
+    profile = await get_user_profile(sid)
     if profile.get("backoffice") == "manual":
-        await _do_manual_daily_prompt(context.bot, settings.telegram_chat_id)
+        await _do_manual_daily_prompt(context.bot, chat_id)
         return ConversationHandler.END
     target_date = _parse_daily_date(" ".join(context.args)) if context.args else ""
-    ok = await _do_daily_fetch(context.bot, settings.telegram_chat_id, target_date)
+    ok = await _do_daily_fetch(context.bot, chat_id, target_date)
+    # Send current bank balance after the daily sheet — silent if no Plaid.
+    await _send_bank_balance(context.bot, sid, chat_id)
     return AWAITING_RIGHT_SIDE if ok else ConversationHandler.END
 
 
@@ -746,6 +750,30 @@ async def scheduled_daily(app: Application) -> None:
 # Each job is registered once per store; these handle exactly one store.
 # ---------------------------------------------------------------------------
 
+async def _send_bank_balance(bot: Bot, store_id: str, chat_id: str) -> None:
+    """
+    Send current bank balance(s) to the chat. No-op if Plaid isn't connected.
+    Called after the 7am daily fetch so owners see the morning balance.
+    """
+    try:
+        from tools.plaid_tools import is_connected, fetch_accounts
+        if not await is_connected(store_id):
+            return
+        accounts = await fetch_accounts(store_id)
+        if not accounts:
+            return
+
+        lines = ["💰 *Bank Balance*", "```"]
+        for a in accounts:
+            name = a.get("official_name") or a.get("name", "Account")
+            current = a.get("current", 0)
+            lines.append(f"  {name[:24]:<24} ${current:>10,.2f}")
+        lines.append("```")
+        await bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        log.warning("store=%s bank balance message failed: %s", store_id, e)
+
+
 async def scheduled_daily_for_store(store_id: str, app: Application) -> None:
     """
     Daily fetch for a single store. Called by the DB-driven scheduler.
@@ -772,6 +800,9 @@ async def scheduled_daily_for_store(store_id: str, app: Application) -> None:
             ok = await _do_daily_fetch(app.bot, store.chat_id)
             if ok:
                 log.info("store=%s daily fetch done — waiting for right-side input", store_id)
+
+        # After the daily sheet, send current bank balance — silent if no Plaid.
+        await _send_bank_balance(app.bot, store_id, store.chat_id)
     except Exception as e:
         log.warning("store=%s scheduled_daily_for_store failed: %s", store_id, e, exc_info=True)
 
