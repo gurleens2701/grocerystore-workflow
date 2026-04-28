@@ -218,14 +218,14 @@ async def fetch_raw_closing(store_id: str, target_date: date) -> dict[str, Any]:
       { "Grocery": [...], "Fuel": [...], "FinancialData": {...} }
 
     If the token is expired, clears it and raises ModisoftTokenExpiredError.
-    The caller should retry — the next call will log in fresh.
+    Retries once on timeout — Modisoft servers occasionally hang under load.
     """
     token = await _get_token(store_id)
     modisoft_store_id = await _resolve_modisoft_store_id(store_id)
     date_str = target_date.strftime("%m-%d-%Y")
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        try:
+    async def _do_fetch() -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(
                 f"{_BASE_URL}/store/GetPOSClosingDetails",
                 data={
@@ -237,19 +237,26 @@ async def fetch_raw_closing(store_id: str, target_date: date) -> dict[str, Any]:
                 headers={"User-Agent": _MOBILE_USER_AGENT},
             )
             r.raise_for_status()
-            data = r.json()
+            return r.json()
 
-            # Some endpoints signal token expiry via IsSuccess=false
-            if isinstance(data, dict) and data.get("IsSuccess") is False and "Grocery" not in data:
-                clear_cached_token(store_id)
-                raise ModisoftTokenExpiredError(f"Modisoft session expired: {data.get('Message')}")
+    try:
+        try:
+            data = await _do_fetch()
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            log.warning("Modisoft fetch timed out — retrying once: %s", e)
+            data = await _do_fetch()
 
-            return data
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (401, 403):
-                clear_cached_token(store_id)
-                raise ModisoftTokenExpiredError("Modisoft session expired") from e
-            raise
+        # Some endpoints signal token expiry via IsSuccess=false
+        if isinstance(data, dict) and data.get("IsSuccess") is False and "Grocery" not in data:
+            clear_cached_token(store_id)
+            raise ModisoftTokenExpiredError(f"Modisoft session expired: {data.get('Message')}")
+
+        return data
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (401, 403):
+            clear_cached_token(store_id)
+            raise ModisoftTokenExpiredError("Modisoft session expired") from e
+        raise
 
 
 async def fetch_raw_summary(store_id: str, target_date: date) -> list[dict[str, Any]]:
