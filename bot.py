@@ -629,16 +629,47 @@ async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     right = _parse_right_side(text, manual_rules)
     if right is None:
-        # Build hint from rules if available, else hardcoded
-        if manual_rules:
-            hint = "\n".join(f"{r.label}: 0" for r in manual_rules)
-        else:
-            hint = "IN. LOTTO: 208\nON. LINE: 4\nLOTTO PO: 39\nLOTTO CR: 0\nFOOD STAMP: 0"
-        await update.message.reply_text(
-            f"⚠️ Could not parse numbers. Please use format:\n{hint}",
-            parse_mode=None,
-        )
-        return AWAITING_RIGHT_SIDE  # stay in state, ask again
+        # Three cases when parsing fails — distinguish them so we don't trap
+        # the owner in "please reply with numbers" hell when they're just chatting.
+
+        # Allow the owner to escape the state at any point.
+        clean = text.strip().lower()
+        if clean in ("cancel", "nevermind", "never mind", "stop", "exit", "quit", "abort"):
+            await clear_state(get_active_store(), _STATE_SALES)
+            await update.message.reply_text(
+                "Daily report cancelled. What do you need?", parse_mode=None,
+            )
+            return ConversationHandler.END
+
+        digits = re.findall(r"\d+\.?\d*", text)
+        if digits and not any(
+            re.search(re.escape(r.label.lower()), text.lower()) or
+            re.search(re.escape(r.field_name.replace("_", " ")), text.lower())
+            for r in (manual_rules or [])
+        ):
+            # Numbers without labels — ambiguous. Ask for the labeled format.
+            hint = "\n".join(f"{r.label}: <number>" for r in (manual_rules or []))
+            await update.message.reply_text(
+                f"I see {len(digits)} numbers but I can't tell which field each is for.\n\n"
+                f"Please reply like this:\n```\n{hint}\n```",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return AWAITING_RIGHT_SIDE
+
+        # No digits at all — owner is asking a question, not entering numbers.
+        # Hand off to the agent and stay in the pending state so they can
+        # come back to entering numbers later.
+        from tools.main_agent import run_agent
+        history = await _load_history(get_active_store())
+        owner_name = (await get_user_profile(get_active_store())).get("name", "")
+        try:
+            reply = await asyncio.to_thread(run_agent, text, get_active_store(), owner_name, history)
+            await update.message.reply_text(reply, parse_mode=None)
+            await _save_history(get_active_store(), history, text, reply)
+        except Exception as e:
+            log.error("Agent failed inside daily-report state: %s", e, exc_info=True)
+            await update.message.reply_text("Sorry, I hit an error. Try again?", parse_mode=None)
+        return AWAITING_RIGHT_SIDE  # daily report still pending, owner can reply with numbers later
 
     # Send complete daily sheet
     sheet_msg = _build_complete_sheet(sales, right, rules=all_rules, store_name=store_name)
