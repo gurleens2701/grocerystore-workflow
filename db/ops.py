@@ -40,35 +40,55 @@ async def log_message(
 # ---------------------------------------------------------------------------
 
 async def save_daily_sales(store_id: str, sales: dict, right: dict) -> None:
-    """Upsert a completed daily sales record (left + right side combined)."""
+    """Upsert a completed daily sales record (left + right side combined).
+
+    Known column fields go in their typed columns; per-store manual fields
+    that don't have a column (money_order, bill_pay, solds, etc.) flow into
+    extra_fields JSONB. Keys come from rule.field_name.
+    """
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     sale_date = date.fromisoformat(sales["date"])
 
+    # Modisoft → DB column aliases (some POS use different names)
+    aliases = {"lotto_payout": "lotto_po", "vendor": "vendor_payout", "check": "check_amount"}
+    column_keys = {
+        "product_sales", "lotto_in", "lotto_online", "sales_tax", "gpi",
+        "grand_total", "refunds", "lotto_po", "lotto_cr", "food_stamp",
+        "cash_drop", "card", "check_amount", "atm", "pull_tab", "coupon",
+        "loyalty", "vendor_payout",
+    }
+
+    # Merge sales (api) and right (manual) — manual wins on conflict
+    merged = dict(sales)
+    merged.update(right)
+
+    extra_fields: dict = {}
+    column_values: dict = {}
+    for k, v in merged.items():
+        if k in ("date", "day_of_week", "departments", "total_transactions"):
+            continue
+        canonical = aliases.get(k, k)
+        if canonical in column_keys:
+            try:
+                column_values[canonical] = Decimal(str(v or 0))
+            except Exception:
+                pass
+        elif isinstance(v, (int, float)):
+            extra_fields[k] = float(v)
+
+    # cash_drop has a legacy alias "cash_drops" — pick it up if present
+    if "cash_drop" not in column_values and "cash_drops" in sales:
+        column_values["cash_drop"] = Decimal(str(sales.get("cash_drops", 0)))
+
     values = dict(
         store_id=store_id,
         sale_date=sale_date,
-        product_sales=Decimal(str(sales.get("product_sales", 0))),
-        lotto_in=Decimal(str(sales.get("lotto_in", 0))),
-        lotto_online=Decimal(str(sales.get("lotto_online", 0))),
-        sales_tax=Decimal(str(sales.get("sales_tax", 0))),
-        gpi=Decimal(str(sales.get("gpi", 0))),
-        grand_total=Decimal(str(sales.get("grand_total", 0))),
-        refunds=Decimal(str(sales.get("refunds", 0))),
-        lotto_po=Decimal(str(right.get("lotto_po", 0))),
-        lotto_cr=Decimal(str(right.get("lotto_cr", 0))),
-        food_stamp=Decimal(str(right.get("food_stamp", 0))),
-        cash_drop=Decimal(str(sales.get("cash_drops", 0))),
-        card=Decimal(str(sales.get("card", 0))),
-        check_amount=Decimal(str(sales.get("check", 0))),
-        atm=Decimal(str(sales.get("atm", 0))),
-        pull_tab=Decimal(str(sales.get("pull_tab", 0))),
-        coupon=Decimal(str(sales.get("coupon", 0))),
-        loyalty=Decimal(str(sales.get("loyalty", 0))),
-        vendor_payout=Decimal(str(sales.get("vendor", 0))),
         departments=sales.get("departments", []),
+        extra_fields=extra_fields,
         total_transactions=int(sales.get("total_transactions", 0)),
         last_updated_by="bot",
+        **{k: column_values.get(k, Decimal("0")) for k in column_keys},
     )
 
     async with get_async_session() as session:

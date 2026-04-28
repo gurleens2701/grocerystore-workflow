@@ -111,75 +111,108 @@ async def _save_history(store_id: str, history: list[dict],
 
 
 # ---------------------------------------------------------------------------
-# Formatting helpers
+# Formatting helpers — rules-driven from platform.store_daily_report_rules
 # ---------------------------------------------------------------------------
 
-def _fmt_left(sales: dict[str, Any]) -> str:
-    """Build the left-side of the daily sheet (product sales + other)."""
+# Field name aliases — different POS types use different names for the same data
+# (e.g. Modisoft: lotto_payout; NRS: lotto_po). The DB column is one canonical name.
+FIELD_NAME_ALIASES = {
+    "lotto_payout": "lotto_po",   # Modisoft uses lotto_payout
+    "vendor":       "vendor_payout",
+    "check":        "check_amount",
+}
+
+# Field name → canonical.daily_sales column name. If a field's not here, it goes
+# into extra_fields JSONB (no schema migration needed for store-specific fields).
+DAILY_SALES_COLUMNS = {
+    "product_sales", "lotto_in", "lotto_online", "sales_tax", "gpi",
+    "grand_total", "refunds", "lotto_po", "lotto_cr", "food_stamp",
+    "cash_drop", "card", "check_amount", "atm", "pull_tab", "coupon",
+    "loyalty", "vendor_payout",
+}
+
+
+def _resolve_value(field_name: str, sales: dict[str, Any], right: dict[str, float]) -> float:
+    """Look up a field's value across both API (sales) and manual (right) dicts,
+    handling POS-specific aliases. Returns 0 if not found."""
+    candidates = [field_name, FIELD_NAME_ALIASES.get(field_name, field_name)]
+    for c in candidates:
+        if c in right:
+            return float(right[c] or 0)
+        if c in sales:
+            return float(sales[c] or 0)
+    # Some Modisoft → DB column reverse aliases (e.g. cash → cash_drop)
+    if field_name == "cash" and "cash_drop" in sales:
+        return float(sales.get("cash_drop", 0) or 0)
+    return 0.0
+
+
+def _fmt_left(sales: dict[str, Any], rules: list = None, store_name: str = "Store") -> str:
+    """
+    Build the left-side of the daily sheet by iterating rules from
+    platform.store_daily_report_rules. Departments come from the API's
+    Grocery breakdown and are rendered before the rule-based totals.
+    """
+    if not rules:
+        # No rules = no display. Strict: every store must have rules configured.
+        return (
+            f"⚠️ No daily report rules configured for this store.\n"
+            f"Run scripts/manage_store.py to set up the daily sheet fields."
+        )
+
+    left_rules = sorted([r for r in rules if r.section == "left"], key=lambda r: r.display_order)
+    right_rules = sorted([r for r in rules if r.section == "right"], key=lambda r: r.display_order)
+
+    # Department breakdown from API (auto, every Modisoft/NRS day has its own list)
     depts = sales.get("departments", [])
     dept_lines = "\n".join(
         f"  {d['name']:<20} ${d['sales']:>8.2f}"
         for d in depts
     )
-    product_sales = sales.get("product_sales", 0)
-    lotto_in = sales.get("lotto_in", 0)
-    lotto_online = sales.get("lotto_online", 0)
-    sales_tax = sales.get("sales_tax", 0)
-    gpi = sales.get("gpi", 0)
-    refunds = sales.get("refunds", 0)
-    # Grand total does NOT subtract refunds (matches manual sheet)
-    grand_total = round(product_sales + lotto_in + lotto_online + sales_tax + gpi, 2)
-    sales["grand_total"] = grand_total  # update in-place
 
+    # Render the rule-driven left-side rows
+    left_body_lines = []
+    grand_total_components = 0.0
+    for r in left_rules:
+        val = _resolve_value(r.field_name, sales, {})
+        if r.source == "manual":
+            # Manual fields show as awaiting until owner replies
+            left_body_lines.append(f"  {r.label:<20} {'[awaiting]':>9}")
+        else:
+            left_body_lines.append(f"  {r.label:<20} ${val:>8.2f}")
+            grand_total_components += val
+
+    # Update sales dict so callers see the running grand_total estimate (manual=0)
+    sales["grand_total"] = round(grand_total_components, 2)
+
+    refunds = sales.get("refunds", 0)
     lines = [
-        f"📊 *Moraine Foodmart — {sales['day_of_week']} {sales['date']}*",
+        f"📊 *{store_name} — {sales['day_of_week']} {sales['date']}*",
         "─" * 34,
         "",
         "*PRODUCT SALES*",
-        f"```\n{dept_lines}",
+        f"```\n{dept_lines or '  (no departments)'}",
         f"{'─'*34}",
-        f"  {'TOTAL':<20} ${product_sales:>8.2f}\n```",
-        "",
-        "*OTHER*",
-        "```",
-        f"  {'IN. LOTTO':<20} ${lotto_in:>8.2f}",
-        f"  {'ON. LINE':<20} ${lotto_online:>8.2f}",
-        f"  {'SALES TAX':<20} ${sales_tax:>8.2f}",
-        f"  {'GPI':<20} ${gpi:>8.2f}",
+        "\n".join(left_body_lines),
         "─" * 34,
-        f"  {'GRAND TOTAL':<20} ${grand_total:>8.2f}",
+        f"  {'GRAND TOTAL':<20} ${grand_total_components:>8.2f}",
         "```",
     ]
     if refunds:
         lines.append(f"_ℹ️ Refunds on record: ${refunds:.2f}_")
 
-    # NRS-sourced payment fields (auto-filled)
-    atm = sales.get("atm", 0)
-    pull_tab = sales.get("pull_tab", 0)
-    coupon = sales.get("coupon", 0)
-    loyalty = sales.get("loyalty", 0)
-    vendor = sales.get("vendor", 0)
+    # Auto-filled right-side fields (from POS API, owner doesn't type these)
+    auto_right_lines = []
+    for r in right_rules:
+        if r.source != "api":
+            continue
+        val = _resolve_value(r.field_name, sales, {})
+        if val:
+            auto_right_lines.append(f"  {r.label:<20} ${val:>8.2f}")
 
-    auto_lines = []
-    if atm:
-        auto_lines.append(f"  {'ATM':<20} ${atm:>8.2f}")
-    if pull_tab:
-        auto_lines.append(f"  {'PULL TAB':<20} ${pull_tab:>8.2f}")
-    if coupon:
-        auto_lines.append(f"  {'COUPON':<20} ${coupon:>8.2f}")
-    if loyalty:
-        auto_lines.append(f"  {'LOYALTY/ALTRIA':<20} ${loyalty:>8.2f}")
-    if vendor:
-        auto_lines.append(f"  {'VENDOR PAYOUT':<20} ${vendor:>8.2f}")
+    if auto_right_lines:
+        lines += ["", "*PAYMENTS (auto)*", "```"] + auto_right_lines + ["```"]
 
-    if auto_lines:
-        lines += ["", "*FROM NRS (auto)*", "```"] + auto_lines + ["```"]
-
-    lines += [
-        "",
-        f"💵 Cash Drop: *${sales.get('cash_drops', 0):.2f}*   💳 Card: *${sales.get('card', 0):.2f}*",
-        f"Baskets: *{sales.get('total_transactions', 0)}*",
-    ]
     return "\n".join(lines)
 
 
@@ -200,36 +233,44 @@ def _prompt_for_right_side(manual_rules=None) -> str:
     )
 
 
-def _build_complete_sheet(sales: dict[str, Any], right: dict[str, float]) -> str:
-    """Build the full daily sheet with over/short."""
-    product_sales = sales.get("product_sales", 0)
-    # Prefer user-supplied values over NRS auto values
-    lotto_in     = right.get("lotto_in",    sales.get("lotto_in",    0))
-    lotto_online = right.get("lotto_online", sales.get("lotto_online", 0))
-    sales_tax = sales.get("sales_tax", 0)
-    gpi = sales.get("gpi", 0)
-    # Recalculate grand total using the (possibly overridden) lotto values
-    grand_total = round(product_sales + lotto_in + lotto_online + sales_tax + gpi, 2)
+def _build_complete_sheet(sales: dict[str, Any], right: dict[str, float],
+                          rules: list = None, store_name: str = "Store") -> str:
+    """Build the full daily sheet with over/short — rules-driven."""
+    if not rules:
+        return "⚠️ No daily report rules configured for this store."
 
-    # From NRS API
-    cash = sales.get("cash_drops", 0)  # safe drop, not total cash received
-    card = sales.get("card", 0)
-    check = sales.get("check", 0)
-    atm = sales.get("atm", 0)
-    pull_tab = sales.get("pull_tab", 0)
-    coupon = sales.get("coupon", 0)
-    loyalty = sales.get("loyalty", 0)
-    vendor = sales.get("vendor", 0)
+    left_rules = sorted([r for r in rules if r.section == "left"], key=lambda x: x.display_order)
+    right_rules = sorted([r for r in rules if r.section == "right"], key=lambda x: x.display_order)
 
-    # From user input
-    lotto_po = right.get("lotto_po", 0)
-    lotto_cr = right.get("lotto_cr", 0)
-    food_stamp = right.get("food_stamp", 0)
+    # ---- LEFT SIDE ----
+    left_lines = []
+    grand_total = 0.0
+    for r in left_rules:
+        val = _resolve_value(r.field_name, sales, right)
+        left_lines.append(f"  {r.label:<20} ${val:>8.2f}")
+        grand_total += val
+    grand_total = round(grand_total, 2)
 
-    total_right = round(
-        cash + card + check + lotto_po + lotto_cr + atm
-        + coupon + pull_tab + food_stamp + loyalty + vendor, 2
-    )
+    # Department breakdown (auto from API)
+    depts = sales.get("departments", [])
+    dept_lines = "\n".join(
+        f"  {d['name']:<20} ${d['sales']:>8.2f}"
+        for d in depts
+    ) or "  (no departments)"
+
+    # ---- RIGHT SIDE ----
+    right_lines = []
+    total_right = 0.0
+    for r in right_rules:
+        val = _resolve_value(r.field_name, sales, right)
+        if val == 0:
+            right_lines.append(f"  {r.label:<20} {'—':>9}")
+        else:
+            right_lines.append(f"  {r.label:<20} ${val:>8.2f}")
+        total_right += val
+    total_right = round(total_right, 2)
+
+    # ---- OVER / SHORT ----
     diff = round(total_right - grand_total, 2)
     if diff > 0:
         over_short = f"OVER  +${diff:.2f} 🟢"
@@ -238,51 +279,24 @@ def _build_complete_sheet(sales: dict[str, Any], right: dict[str, float]) -> str
     else:
         over_short = "EVEN  $0.00 ✅"
 
-    # Left side
-    depts = sales.get("departments", [])
-    dept_lines = "\n".join(
-        f"  {d['name']:<20} ${d['sales']:>8.2f}"
-        for d in depts
-    )
-
-    def r(label: str, val: float) -> str:
-        if val == 0:
-            return f"  {label:<20} {'—':>9}"
-        return f"  {label:<20} ${val:>8.2f}"
-
     msg = (
-        f"✅ *COMPLETE — {sales['day_of_week']} {sales['date']}*\n"
+        f"✅ *{store_name} — {sales['day_of_week']} {sales['date']}*\n"
         f"```\n"
         f"{'─'*34}\n"
         f"  PRODUCT SALES\n"
         f"{dept_lines}\n"
         f"{'─'*34}\n"
-        f"  {'TOTAL':<20} ${product_sales:>8.2f}\n"
-        f"\n"
-        f"  IN. LOTTO            ${lotto_in:>8.2f}\n"
-        f"  ON. LINE             ${lotto_online:>8.2f}\n"
-        f"  SALES TAX            ${sales_tax:>8.2f}\n"
-        f"  GPI                  ${gpi:>8.2f}\n"
-        f"{'─'*34}\n"
-        f"  GRAND TOTAL          ${grand_total:>8.2f}\n"
-        f"\n"
-        f"  PAYMENTS\n"
-        f"{r('LOTTO P.O', lotto_po)}\n"
-        f"{r('LOTTO CR.', lotto_cr)}\n"
-        f"{r('ATM', atm)}\n"
-        f"  {'CASH DROP':<20} ${cash:>8.2f}\n"
-        f"  {'CHECK':<20} ${check:>8.2f}\n"
-        f"  {'C.CARD':<20} ${card:>8.2f}\n"
-        f"{r('COUPON', coupon)}\n"
-        f"{r('PULL TAB', pull_tab)}\n"
-        f"{r('FOOD STAMP', food_stamp)}\n"
-        f"{r('LOYALTY', loyalty)}\n"
-        f"{r('VENDOR PAYOUT', vendor)}\n"
-        f"{'─'*34}\n"
-        f"  TOTAL PAYMENTS       ${total_right:>8.2f}\n"
-        f"{'─'*34}\n"
-        f"  {over_short}\n"
-        f"```"
+        + "\n".join(left_lines) + "\n"
+        + f"{'─'*34}\n"
+        + f"  {'GRAND TOTAL':<20} ${grand_total:>8.2f}\n"
+        + f"\n"
+        + f"  PAYMENTS\n"
+        + "\n".join(right_lines) + "\n"
+        + f"{'─'*34}\n"
+        + f"  {'TOTAL PAYMENTS':<20} ${total_right:>8.2f}\n"
+        + f"{'─'*34}\n"
+        + f"  {over_short}\n"
+        + f"```"
     )
     return msg
 
@@ -520,7 +534,9 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
 
         await save_state(get_active_store(), _STATE_SALES, sales)
 
-        msg = _fmt_left(sales) + _prompt_for_right_side(manual_rules)
+        rules = store.daily_report_rules if store else None
+        store_name = store.store_name if store else "Store"
+        msg = _fmt_left(sales, rules=rules, store_name=store_name) + _prompt_for_right_side(manual_rules)
         await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
         asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", msg))
 
@@ -599,10 +615,14 @@ async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Load store rules for the parser so it knows which manual fields to expect
     manual_rules = None
+    all_rules = None
+    store_name = "Store"
     try:
         store = await load_store(chat_id=str(update.effective_chat.id))
         if store:
             manual_rules = store.get_manual_rules()
+            all_rules = store.daily_report_rules
+            store_name = store.store_name
     except Exception as _e:
         log.warning("Could not load rules for right-side parse: %s", _e)
 
@@ -620,7 +640,7 @@ async def receive_right_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return AWAITING_RIGHT_SIDE  # stay in state, ask again
 
     # Send complete daily sheet
-    sheet_msg = _build_complete_sheet(sales, right)
+    sheet_msg = _build_complete_sheet(sales, right, rules=all_rules, store_name=store_name)
     await update.message.reply_text(sheet_msg, parse_mode=ParseMode.MARKDOWN)
 
     # Log to Google Sheets

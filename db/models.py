@@ -88,6 +88,11 @@ class DailySales(Base):
     # Department breakdown JSON [{"name": "BEER", "sales": 123.45, "items": 10}, ...]
     departments: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
 
+    # Per-store manual fields that don't fit in fixed columns. Free-form key/value
+    # to keep the daily sheet flexible without schema migrations per store.
+    # Keys come from platform.store_daily_report_rules.field_name.
+    extra_fields: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+
     total_transactions: Mapped[int] = mapped_column(Integer, default=0)
 
     last_updated_by: Mapped[str] = mapped_column(String(16), default="bot")

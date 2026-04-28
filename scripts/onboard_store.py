@@ -67,23 +67,34 @@ NRS_CONVENIENCE_TEMPLATE = [
     ("right", "vendor",        "VENDOR",       "api",   11),
 ]
 
-# For a Modisoft fuel station — most fields come from the mobile API.
-# Fuel $ and gallons are extra fields Modisoft gives us for free.
+# For a Modisoft fuel station. Department breakdowns (BEER, WINE, SODA,
+# CIGARETTES, etc.) come dynamically from sales["departments"] — DO NOT
+# hardcode them here, every store has different categories.
+# Fix point: changing layout for an existing Modisoft store? Use
+# scripts/manage_store.py — don't edit this template (only affects new onboards).
 MODISOFT_FUEL_TEMPLATE = [
-    ("left",  "product_sales", "PRODUCT",      "api",    1),
-    ("left",  "gas_dollars",   "GAS $",        "api",    2),
-    ("left",  "gas_gallons",   "GAS GAL",      "api",    3),
-    ("left",  "lotto_in",      "LOTTO",        "api",    4),
-    ("left",  "sales_tax",     "SALES TAX",    "api",    5),
-    ("right", "cash_drop",     "CASH DROP",    "api",    1),
-    ("right", "credit",        "CREDIT",       "api",    2),
-    ("right", "debit",         "DEBIT",        "api",    3),
-    ("right", "food_stamp",    "FOOD STAMP",   "api",    4),
-    ("right", "lotto_payout",  "LOTTO PO",     "api",    5),
-    ("right", "atm",           "ATM",          "api",    6),
-    ("right", "pull_tab",      "PULL TAB",     "api",    7),
-    ("right", "coupon",        "COUPON",       "api",    8),
-    ("right", "vendor",        "VENDOR",       "api",    9),
+    # LEFT — totals + lottery + tax + fuel
+    ("left",  "product_sales", "TOTAL GRO.",   "api",     1),
+    ("left",  "lotto_online",  "ON. LINE",     "api",     2),
+    ("left",  "lotto_in",      "IN. LOTTO",    "api",     3),
+    ("left",  "money_order",   "M. ORDER",     "manual",  4),
+    ("left",  "bill_pay",      "BILL PAY",     "manual",  5),
+    ("left",  "check_fee",     "CHECK FEE",    "manual",  6),
+    ("left",  "sales_tax",     "SALES TAX",    "api",     7),
+    ("left",  "gas_dollars",   "GAS",          "api",     8),
+    ("left",  "solds",         "SOLDS",        "manual",  9),
+    ("left",  "paid_in",       "PAY IN",       "api",    10),
+    # RIGHT — payouts + payments
+    ("right", "lotto_payout",  "LOTTO P.O",    "manual",  1),
+    ("right", "lotto_cr",      "LOTTO CR",     "manual",  2),
+    ("right", "atm",           "ATM",          "api",     3),
+    ("right", "cash_drop",     "CASH",         "api",     4),
+    ("right", "check",         "CHECK",        "api",     5),
+    ("right", "card",          "C.CARD",       "api",     6),
+    ("right", "coupon",        "COUPONS",      "api",     7),
+    ("right", "pull_tab",      "PULL TAB",     "api",     8),
+    ("right", "food_stamp",    "FOOD STAMP",   "api",     9),
+    ("right", "vendor",        "PAID OUT",     "api",    10),
 ]
 
 # For a manual-entry store (no POS connector) — everything is manual.
