@@ -73,24 +73,28 @@ NRS_CONVENIENCE_TEMPLATE = [
 # Fix point: changing layout for an existing Modisoft store? Use
 # scripts/manage_store.py — don't edit this template (only affects new onboards).
 MODISOFT_FUEL_TEMPLATE = [
-    # LEFT — totals + lottery + tax + fuel
+    # LEFT — totals + lottery + tax + fuel.
+    # Lottery is the only manual area — POS lottery numbers aren't trustworthy
+    # so the owner enters them by hand. Everything else comes from Modisoft.
+    # Note: GAS is GALLONS sold; SOLDS is the dollars from those gallons.
     ("left",  "product_sales", "TOTAL GRO.",   "api",     1),
-    ("left",  "lotto_online",  "ON. LINE",     "api",     2),
-    ("left",  "lotto_in",      "IN. LOTTO",    "api",     3),
-    ("left",  "money_order",   "M. ORDER",     "manual",  4),
-    ("left",  "bill_pay",      "BILL PAY",     "manual",  5),
-    ("left",  "check_fee",     "CHECK FEE",    "manual",  6),
+    ("left",  "lotto_online",  "ON. LINE",     "manual",  2),
+    ("left",  "lotto_in",      "IN. LOTTO",    "manual",  3),
+    ("left",  "money_order",   "M. ORDER",     "api",     4),
+    ("left",  "bill_pay",      "BILL PAY",     "api",     5),
+    ("left",  "check_fee",     "CHECK FEE",    "api",     6),
     ("left",  "sales_tax",     "SALES TAX",    "api",     7),
-    ("left",  "gas_dollars",   "GAS",          "api",     8),
-    ("left",  "solds",         "SOLDS",        "manual",  9),
+    ("left",  "gas_gallons",   "GAS",          "api",     8),  # gallons!
+    ("left",  "gas_dollars",   "SOLDS",        "api",     9),  # gas $ amount
     ("left",  "paid_in",       "PAY IN",       "api",    10),
-    # RIGHT — payouts + payments
+    # RIGHT — payouts + payments. Owner only types lotto payout/credit.
+    # C.CARD = credit only (not credit+debit) per Hamilton owner's preference.
     ("right", "lotto_payout",  "LOTTO P.O",    "manual",  1),
     ("right", "lotto_cr",      "LOTTO CR",     "manual",  2),
     ("right", "atm",           "ATM",          "api",     3),
     ("right", "cash_drop",     "CASH",         "api",     4),
     ("right", "check",         "CHECK",        "api",     5),
-    ("right", "card",          "C.CARD",       "api",     6),
+    ("right", "credit",        "C.CARD",       "api",     6),
     ("right", "coupon",        "COUPONS",      "api",     7),
     ("right", "pull_tab",      "PULL TAB",     "api",     8),
     ("right", "food_stamp",    "FOOD STAMP",   "api",     9),
