@@ -370,16 +370,13 @@ Examples:
         return None
 
 
-def _build_preview(sales: dict) -> str:
-    """Build a live preview of the complete daily sheet from the current sales state."""
-    right = {
-        "lotto_in":    sales.get("lotto_in",    0),
-        "lotto_online": sales.get("lotto_online", 0),
-        "lotto_po":    sales.get("lotto_po",    0),
-        "lotto_cr":    sales.get("lotto_cr",    0),
-        "food_stamp":  sales.get("food_stamp",  0),
-    }
-    return _build_complete_sheet(sales, right)
+def _build_preview(sales: dict, rules: list = None, store_name: str = "Store") -> str:
+    """Build a live preview of the complete daily sheet from current sales state.
+
+    Manual values are already merged into `sales` by the parser, so we pass
+    sales as both `sales` and `right` — _resolve_value finds them either way.
+    """
+    return _build_complete_sheet(sales, sales, rules=rules, store_name=store_name)
 
 
 def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
@@ -1365,6 +1362,21 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     if sales:
         clean_reply = text.strip().lower()
 
+        # Load this store's rules + name once so every preview/save call below uses them.
+        # Without this, _build_preview falls back to Moraine's hardcoded fields and shows
+        # "No daily report rules configured" for any non-NRS store.
+        store_rules = None
+        store_name = "Store"
+        manual_rules = None
+        try:
+            _store = await load_store(chat_id=str(update.effective_chat.id))
+            if _store:
+                store_rules = _store.daily_report_rules
+                store_name = _store.store_name
+                manual_rules = _store.get_manual_rules()
+        except Exception as _e:
+            log.warning("Could not load store rules in pending-sales path: %s", _e)
+
         # ── Cancel — escape from daily report state to normal chat ─────────────
         if clean_reply in ("cancel", "nevermind", "never mind", "stop", "exit", "quit", "abort"):
             await clear_state(get_active_store(), _STATE_SALES)
@@ -1376,12 +1388,19 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
 
         # ── Save / confirm ───────────────────────────────────────────────────
         if clean_reply in ("ok", "confirm", "yes", "save", "good", "correct", "done", "log it", "log"):
-            right = {
-                "lotto_po":   sales.get("lotto_po",   sales.get("_ocr_lotto_po",   0)),
-                "lotto_cr":   sales.get("lotto_cr",   sales.get("_ocr_lotto_cr",   0)),
-                "food_stamp": sales.get("food_stamp", sales.get("_ocr_food_stamp", 0)),
-            }
-            preview = _build_complete_sheet(sales, right)
+            # Pull all manual fields out of sales (they were merged in by _parse_right_side)
+            right = {}
+            if manual_rules:
+                for r in manual_rules:
+                    if r.field_name in sales:
+                        right[r.field_name] = sales[r.field_name]
+            else:
+                right = {
+                    "lotto_po":   sales.get("lotto_po",   sales.get("_ocr_lotto_po",   0)),
+                    "lotto_cr":   sales.get("lotto_cr",   sales.get("_ocr_lotto_cr",   0)),
+                    "food_stamp": sales.get("food_stamp", sales.get("_ocr_food_stamp", 0)),
+                }
+            preview = _build_complete_sheet(sales, right, rules=store_rules, store_name=store_name)
             await update.message.reply_text(preview, parse_mode=ParseMode.MARKDOWN)
             await update.message.reply_text("📊 Logging to Google Sheets...", parse_mode=None)
             try:
@@ -1398,29 +1417,52 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             return
 
         # ── Structured right-side format (LOTTO PO: X / LOTTO CR: Y / FOOD STAMP: Z) ──
-        right = _parse_right_side(text)
+        right = _parse_right_side(text, manual_rules)
         if right is not None:
             sales.update(right)
             await save_state(get_active_store(), _STATE_SALES, sales)
-            preview = _build_preview(sales)
+            preview = _build_preview(sales, rules=store_rules, store_name=store_name)
             await update.message.reply_text(preview, parse_mode=ParseMode.MARKDOWN)
             await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
             return
 
-        # ── Natural language edit ("change card to 1300", "lotto payout 500") ──
-        edits = await asyncio.to_thread(_parse_sales_edit, text, sales
-        )
-        if edits:
-            sales.update(edits)
-            await save_state(get_active_store(), _STATE_SALES, sales)
-            changed = ", ".join(f"{k}=${v:.2f}" for k, v in edits.items())
-            preview = _build_preview(sales)
+        # ── Ambiguous-number detection ───────────────────────────────────────
+        # If the message is just digits (no field labels) but they typed numbers,
+        # they likely meant manual values — ask for clarification rather than
+        # letting the agent guess (or _parse_sales_edit hallucinate).
+        digits_only = re.findall(r"\d+\.?\d*", text)
+        has_label = any(
+            re.search(re.escape(r.label.lower()), text.lower()) or
+            re.search(re.escape(r.field_name.replace("_", " ")), text.lower())
+            for r in (manual_rules or [])
+        ) if manual_rules else False
+        if digits_only and not has_label and manual_rules:
+            field_list = "\n".join(f"  {r.label}" for r in manual_rules)
             await update.message.reply_text(
-                f"Updated: {changed}\n\n" + preview,
+                f"I see {len(digits_only)} numbers but I can't tell which field each is for. "
+                f"Please reply like this:\n```\n"
+                f"{chr(10).join(f'{r.label}: <number>' for r in manual_rules)}\n```",
                 parse_mode=ParseMode.MARKDOWN,
             )
-            await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
             return
+
+        # ── Natural language edit ("change card to 1300", "lotto payout 500") ──
+        # Only run for Moraine (legacy hardcoded fields). Hamilton/other stores
+        # skip this — _parse_sales_edit's prompt assumes Moraine's field names
+        # and would hallucinate wrong fields for other layouts.
+        if not store_rules or store_name == "Moraine Foodmart":
+            edits = await asyncio.to_thread(_parse_sales_edit, text, sales)
+            if edits:
+                sales.update(edits)
+                await save_state(get_active_store(), _STATE_SALES, sales)
+                changed = ", ".join(f"{k}=${v:.2f}" for k, v in edits.items())
+                preview = _build_preview(sales, rules=store_rules, store_name=store_name)
+                await update.message.reply_text(
+                    f"Updated: {changed}\n\n" + preview,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
+                return
 
         # ── Nothing matched — fall through to the agent. Do NOT nag about the
         # pending report on every message; user already saw it, and spamming
