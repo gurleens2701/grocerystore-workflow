@@ -25,7 +25,7 @@ from config.settings import settings
 from config.store_context import get_active_store, set_active_store
 from db.database import get_sync_session
 from db.models import (
-    DailySales, Expense, Invoice, InvoiceItem, Rebate, Revenue,
+    DailySales, Expense, Invoice, InvoiceItem, Rebate, Revenue, Store,
 )
 import tools.sheets_tools as sheets_tools
 from tools.sheets_tools import resolve_vendor, VENDOR_ALIAS_MAP
@@ -723,6 +723,19 @@ _ALL_TOOLS = [
 _TOOLS_BY_NAME = {t.name: t for t in _ALL_TOOLS}
 
 
+def _get_store_name(store_id: str) -> str:
+    """Resolve the store display name from platform.stores."""
+    try:
+        with get_sync_session() as session:
+            row = session.execute(
+                select(Store.store_name).where(Store.store_id == store_id)
+            ).scalar_one_or_none()
+            return row or settings.store_name
+    except Exception as e:
+        log.warning("Could not load store name for store=%s: %s", store_id, e)
+        return settings.store_name
+
+
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
@@ -826,6 +839,7 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
     """
     from config.store_context import set_active_store, get_active_store
     set_active_store(store_id)
+    store_name = _get_store_name(store_id)
     tools = _build_tool_list(store_id)
     llm = ChatAnthropic(
         model="claude-sonnet-4-6",
@@ -837,7 +851,7 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
     messages: list = [
         SystemMessage(content=_SYSTEM.format(
             today=date.today(),
-            store_name=settings.store_name,
+            store_name=store_name,
             owner_line=owner_line,
         )),
     ]

@@ -205,7 +205,9 @@ async def load_store(*, chat_id: str | None = None, store_id: str | None = None)
     async with get_async_session() as session:
         if chat_id:
             row = (await session.execute(
-                select(Store).where(Store.chat_id == str(chat_id), Store.is_active == True)
+                select(Store)
+                .where(Store.chat_id == str(chat_id), Store.is_active == True)
+                .order_by(Store.created_at.desc())
             )).scalars().first()
         else:
             row = (await session.execute(

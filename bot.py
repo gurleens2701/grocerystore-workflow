@@ -230,6 +230,40 @@ def _prompt_for_right_side(manual_rules=None) -> str:
     )
 
 
+def _manual_fields_text(manual_rules=None) -> str:
+    """Human-readable list of manual fields for the active store."""
+    if manual_rules:
+        return ", ".join(r.label for r in manual_rules)
+    return "the requested manual fields"
+
+
+def _build_pending_report_context(sales: dict, store=None) -> str:
+    """Compact store-aware context for the AI agent while a daily report is pending."""
+    manual_rules = store.get_manual_rules() if store else []
+    rules = store.daily_report_rules if store else []
+    pos_label = store.pos_type.upper() if store else "POS"
+    manual_labels = _manual_fields_text(manual_rules)
+
+    auto_parts = []
+    for r in sorted(rules, key=lambda x: (x.section, x.display_order)):
+        if r.source == "manual":
+            continue
+        val = _resolve_value(r.field_name, sales, {})
+        auto_parts.append(f"{r.label}=${val:.2f}")
+    if not auto_parts:
+        auto_parts = [
+            f"product_sales=${sales.get('product_sales', 0):.2f}",
+            f"grand_total=${sales.get('grand_total', 0):.2f}",
+        ]
+
+    return (
+        f"[Context: There is a pending daily sales report for {sales.get('date', 'today')} "
+        f"at {store.store_name if store else 'this store'}. "
+        f"{pos_label} auto-filled: {', '.join(auto_parts)}. "
+        f"To finalize the report, the owner must reply with: {manual_labels}.]"
+    )
+
+
 def _build_complete_sheet(sales: dict[str, Any], right: dict[str, float],
                           rules: list = None, store_name: str = "Store") -> str:
     """Build the full daily sheet with over/short — rules-driven."""
@@ -502,7 +536,11 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
         store = None
         manual_rules = None
         try:
-            store = await load_store(chat_id=str(chat_id))
+            active_store_id = get_active_store(required=False)
+            if active_store_id:
+                store = await load_store(store_id=active_store_id)
+            if not store:
+                store = await load_store(chat_id=str(chat_id))
             if store:
                 manual_rules = store.get_manual_rules()
         except Exception as _e:
@@ -537,16 +575,8 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
         # Save daily report summary to history so follow-up questions have context
         summary = (
             f"I sent the daily sales report for {sales.get('date', 'today')}. "
-            f"NRS data: product_sales=${sales.get('product_sales', 0):.2f}, "
-            f"instant_lotto=${sales.get('lotto_in', 0):.2f}, "
-            f"online_lotto=${sales.get('lotto_online', 0):.2f}, "
-            f"sales_tax=${sales.get('sales_tax', 0):.2f}, "
-            f"gpi=${sales.get('gpi', 0):.2f}, "
-            f"grand_total=${sales.get('grand_total', 0):.2f}, "
-            f"cash_drop=${sales.get('cash_drop', 0):.2f}, "
-            f"card=${sales.get('card', 0):.2f}, "
-            f"atm=${sales.get('atm', 0):.2f}. "
-            f"Still waiting for owner to enter: IN. LOTTO, ON. LINE, LOTTO PO, LOTTO CR, FOOD STAMP."
+            f"{pos_label} data is loaded for {store_name}. "
+            f"Still waiting for owner to enter: {_manual_fields_text(manual_rules)}."
         )
         hist = await _load_history(get_active_store())
         hist.append({"role": "assistant", "content": summary})
@@ -624,6 +654,7 @@ async def scheduled_daily(app: Application) -> None:
         stores_chat_ids = [(s.store_id, s.chat_id) for s in stores]
 
     for store_id, chat_id in stores_chat_ids:
+        set_active_store(store_id)
         try:
             profile = await get_user_profile(store_id)
             if profile.get("backoffice") == "manual":
@@ -1317,9 +1348,12 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         if clean_reply in ("ok", "confirm", "yes", "save", "good", "correct", "done", "log it", "log"):
             # Pull all manual fields out of sales (they were merged in by _parse_right_side)
             right = {}
+            manual_values = sales.get("_manual_values") or {}
             if manual_rules:
                 for r in manual_rules:
-                    if r.field_name in sales:
+                    if r.field_name in manual_values:
+                        right[r.field_name] = manual_values[r.field_name]
+                    elif r.field_name in sales:
                         right[r.field_name] = sales[r.field_name]
             else:
                 right = {
@@ -1347,6 +1381,9 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         right = _parse_right_side(text, manual_rules)
         if right is not None:
             sales.update(right)
+            manual_values = dict(sales.get("_manual_values") or {})
+            manual_values.update(right)
+            sales["_manual_values"] = manual_values
             await save_state(get_active_store(), _STATE_SALES, sales)
             preview = _build_preview(sales, rules=store_rules, store_name=store_name)
             await update.message.reply_text(preview, parse_mode=ParseMode.MARKDOWN)
@@ -1364,6 +1401,32 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             for r in (manual_rules or [])
         ) if manual_rules else False
         if digits_only and not has_label and manual_rules:
+            manual_values = dict(sales.get("_manual_values") or {})
+            missing_rules = [r for r in manual_rules if r.field_name not in manual_values]
+            if 0 < len(digits_only) <= len(missing_rules):
+                partial = {
+                    r.field_name: round(float(v.replace(",", "").replace("$", "")), 2)
+                    for r, v in zip(missing_rules, digits_only)
+                }
+                sales.update(partial)
+                manual_values.update(partial)
+                sales["_manual_values"] = manual_values
+                await save_state(get_active_store(), _STATE_SALES, sales)
+
+                still_missing = [r for r in manual_rules if r.field_name not in manual_values]
+                preview = _build_preview(sales, rules=store_rules, store_name=store_name)
+                await update.message.reply_text(preview, parse_mode=ParseMode.MARKDOWN)
+                if still_missing:
+                    await update.message.reply_text(
+                        "Still need:\n```\n"
+                        + "\n".join(f"{r.label}: <number>" for r in still_missing)
+                        + "\n```",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                else:
+                    await update.message.reply_text("Reply *ok* to save, or change any number.", parse_mode=ParseMode.MARKDOWN)
+                return
+
             field_list = "\n".join(f"  {r.label}" for r in manual_rules)
             await update.message.reply_text(
                 f"I see {len(digits_only)} numbers but I can't tell which field each is for. "
@@ -1552,11 +1615,12 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
     log.info("Intent: %s | %s", intent, text[:60])
 
     if intent == "daily_fetch":
+        chat_id = str(update.effective_chat.id)
         if profile.get("backoffice") == "manual":
-            await _do_manual_daily_prompt(context.bot, settings.telegram_chat_id)
+            await _do_manual_daily_prompt(context.bot, chat_id)
         else:
             target_date = _parse_daily_date(text)
-            await _do_daily_fetch(context.bot, settings.telegram_chat_id, target_date)
+            await _do_daily_fetch(context.bot, chat_id, target_date)
     else:
         from tools.main_agent import run_agent
 
@@ -1568,21 +1632,8 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         pending_sales = await get_state(get_active_store(), _STATE_SALES)
         question = text
         if pending_sales:
-            question = (
-                f"[Context: There is a pending daily sales report for {pending_sales.get('date', 'today')} "
-                f"waiting for LOTTO PO, LOTTO CR, and FOOD STAMP manual inputs. "
-                f"NRS auto-filled: product_sales=${pending_sales.get('product_sales', 0):.2f}, "
-                f"instant_lotto=${pending_sales.get('lotto_in', 0):.2f}, "
-                f"online_lotto=${pending_sales.get('lotto_online', 0):.2f}, "
-                f"sales_tax=${pending_sales.get('sales_tax', 0):.2f}, "
-                f"gpi=${pending_sales.get('gpi', 0):.2f}, "
-                f"grand_total=${pending_sales.get('grand_total', 0):.2f}, "
-                f"cash_drop=${pending_sales.get('cash_drop', 0):.2f}, "
-                f"card=${pending_sales.get('card', 0):.2f}. "
-                f"To finalize the report, the owner must reply with: "
-                f"IN. LOTTO: X / ON. LINE: X / LOTTO PO: X / LOTTO CR: Y / FOOD STAMP: Z]\n\n"
-                f"Owner says: {text}"
-            )
+            store = await load_store(store_id=get_active_store())
+            question = f"{_build_pending_report_context(pending_sales, store)}\n\nOwner says: {text}"
 
         try:
             reply = await asyncio.to_thread(run_agent, question, get_active_store(), owner_name, history
@@ -1705,9 +1756,17 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Check if this is a pending daily sheet response
         sales = await get_state(get_active_store(), _STATE_SALES)
         if sales:
-            right = _parse_right_side(text)
+            store = await load_store(store_id=get_active_store())
+            manual_rules = store.get_manual_rules() if store else None
+            store_rules = store.daily_report_rules if store else None
+            store_name = store.store_name if store else "Store"
+            right = _parse_right_side(text, manual_rules)
             if right is not None:
-                sheet_msg = _build_complete_sheet(sales, right)
+                sales.update(right)
+                manual_values = dict(sales.get("_manual_values") or {})
+                manual_values.update(right)
+                sales["_manual_values"] = manual_values
+                sheet_msg = _build_complete_sheet(sales, right, rules=store_rules, store_name=store_name)
                 await update.message.reply_text(sheet_msg, parse_mode=ParseMode.MARKDOWN)
                 try:
                     sales_for_sheet = dict(sales)
@@ -1724,9 +1783,9 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Otherwise run through unified agent
         intent = classify_message(text)
         if intent == "daily_fetch":
-            await _do_daily_fetch(context.bot, settings.telegram_chat_id)
+            await _do_daily_fetch(context.bot, str(update.effective_chat.id))
         else:
-            reply = await asyncio.to_thread(run_agent, text, get_active_store())
+            reply = await asyncio.to_thread(run_agent, text, get_active_store(), profile.get("name", ""))
             asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", reply))
 
             # Send voice reply + text reply
@@ -2031,6 +2090,19 @@ def _build_subcat_keyboard(rtype: str, txn_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def _get_active_chat_id(default: str | None = None) -> str:
+    """Resolve the Telegram chat for the active store."""
+    try:
+        sid = get_active_store(required=False)
+        if sid:
+            store = await load_store(store_id=sid)
+            if store:
+                return store.chat_id
+    except Exception as e:
+        log.warning("Could not resolve active store chat_id: %s", e)
+    return default or settings.telegram_chat_id
+
+
 async def _send_invoice_paid_alert(bot: Bot, inv: dict) -> None:
     """Notify owner that a vendor invoice has been confirmed paid by the bank."""
     text = (
@@ -2041,7 +2113,7 @@ async def _send_invoice_paid_alert(bot: Bot, inv: dict) -> None:
         f"  Google Sheet cell marked green ✔"
     )
     await bot.send_message(
-        chat_id=settings.telegram_chat_id,
+        chat_id=await _get_active_chat_id(),
         text=text,
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -2074,7 +2146,7 @@ async def mark_txn_confirmed_on_telegram(txn_id: int, reconcile_type: str, subca
         label += f" ({subcategory})"
     try:
         await bot.edit_message_text(
-            chat_id=settings.telegram_chat_id,
+            chat_id=await _get_active_chat_id(),
             message_id=msg_id,
             text=f"✅ Confirmed via dashboard: {label}",
             parse_mode=None,
@@ -2118,7 +2190,7 @@ async def send_bank_review_request(bot: Bot, txn: dict) -> None:
             InlineKeyboardButton("❌ No, something else", callback_data=f"bk_no:{txn['id']}"),
         ]]
         msg = await bot.send_message(
-            chat_id=settings.telegram_chat_id,
+            chat_id=await _get_active_chat_id(),
             text=text,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -2144,7 +2216,7 @@ async def send_bank_review_request(bot: Bot, txn: dict) -> None:
         for label, rtype in _REVIEW_TYPES
     ]
     msg = await bot.send_message(
-        chat_id=settings.telegram_chat_id,
+        chat_id=await _get_active_chat_id(),
         text=text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -2175,7 +2247,7 @@ async def send_bank_auto_review(bot: Bot, txn: dict) -> None:
         InlineKeyboardButton("✏️ Change", callback_data=f"bk_change:{txn['id']}"),
     ]]
     msg = await bot.send_message(
-        chat_id=settings.telegram_chat_id,
+        chat_id=await _get_active_chat_id(),
         text=text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -2278,7 +2350,7 @@ async def send_cc_settlement_alert(bot: Bot, settlement: dict) -> None:
         ]])
 
     await bot.send_message(
-        chat_id=settings.telegram_chat_id,
+        chat_id=await _get_active_chat_id(),
         text=text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup,
@@ -2351,7 +2423,7 @@ async def _send_stale_review_reminder(bot: Bot) -> None:
 
     if stale_count > 0:
         await bot.send_message(
-            chat_id=settings.telegram_chat_id,
+            chat_id=await _get_active_chat_id(),
             text=(
                 f"🔔 *{stale_count} bank transaction{'s' if stale_count > 1 else ''} "
                 f"waiting for review* (2+ days old)\n\n"
