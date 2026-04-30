@@ -86,9 +86,16 @@ async def login(body: LoginRequest):
     if not ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     token = create_access_token({"sub": body.username, "store_ids": store_ids})
+    from db.models import Store
+    first_store = None
+    if store_ids:
+        async with get_session_for_store("_") as session:
+            first_store = (await session.execute(
+                select(Store).where(Store.store_id == store_ids[0])
+            )).scalars().first()
     return LoginResponse(
         access_token=token,
-        store_name=store_ids[0].replace("_", " ").title() if store_ids else "",
+        store_name=first_store.store_name if first_store else "",
         store_ids=store_ids,
     )
 
@@ -276,12 +283,14 @@ async def get_settings(
 ):
     from config.store_context import get_store_sheet_id
     sid = resolve_store(store_id, user)
+    from config.store_registry import load_store
+    store = await load_store(store_id=sid)
     try:
         sheet_url = f"https://docs.google.com/spreadsheets/d/{get_store_sheet_id(sid)}"
     except RuntimeError:
         sheet_url = ""
     return {
-        "store_name": sid.replace("_", " ").title(),
+        "store_name": store.store_name if store else "your store",
         "google_sheet_url": sheet_url,
     }
 
@@ -352,7 +361,9 @@ async def web_chat(body: ChatRequest, user: dict = Depends(get_current_user)):
         from telegram import Bot
         from config.store_registry import load_store
         store = await load_store(store_id=sid)
-        chat_id = store.chat_id if store else settings.telegram_chat_id
+        if not store:
+            raise RuntimeError(f"Store profile not found for {sid}")
+        chat_id = store.chat_id
         bot = Bot(token=settings.telegram_bot_token)
         tg_text = f"💬 *{sender}*: {msg}\n\n{reply}"
         await bot.send_message(chat_id=int(chat_id), text=tg_text, parse_mode="Markdown")
@@ -1162,9 +1173,13 @@ async def web_chat_invoice(
     # Notify Telegram
     try:
         from telegram import Bot
+        from config.store_registry import load_store
+        store = await load_store(store_id=sid)
+        if not store:
+            raise RuntimeError(f"Store profile not found for {sid}")
         bot = Bot(token=settings.telegram_bot_token)
         await bot.send_message(
-            chat_id=settings.telegram_chat_id,
+            chat_id=store.chat_id,
             text=f"💬 *{sender}* uploaded an invoice\n\n{summary}",
             parse_mode="Markdown",
         )
@@ -1381,4 +1396,3 @@ async def bank_skip(
     except Exception:
         pass
     return {"status": "skipped"}
-

@@ -166,12 +166,25 @@ def query_prices(product: str) -> str:
 _QUERY_TOOLS = [query_sales, query_expenses, query_invoices, query_rebates, query_revenue, query_prices, query_vendors]
 _TOOLS_BY_NAME = {t.name: t for t in _QUERY_TOOLS}
 
+
+def _get_store_name() -> str:
+    try:
+        from db.models import Store
+        with get_sync_session() as session:
+            row = session.execute(
+                select(Store.store_name).where(Store.store_id == get_active_store())
+            ).scalar_one_or_none()
+            return row or "your store"
+    except Exception:
+        return "your store"
+
 _SYSTEM = """\
 You are a helpful assistant for a gas station convenience store. \
 The owner and staff may not speak perfect English and are not tech-savvy. \
 Understand what they mean even if it is spelled wrong or phrased oddly.
 
 RULES:
+- Privacy is mandatory. You are speaking only for {store_name}. Never mention, compare, reveal, or guess any other store name, store ID, owner, chat, sheet, credentials, or data.
 - Reply in plain conversational English only. No markdown, no asterisks, no bold, no bullet points, no emojis.
 - Be direct. Answer like a knowledgeable friend, not a database report.
 - Keep answers SHORT — 1 to 3 sentences is ideal. Only give more if truly needed.
@@ -207,7 +220,7 @@ def answer_query(question: str) -> str:
     ).bind_tools(_QUERY_TOOLS)
 
     messages = [
-        SystemMessage(content=_SYSTEM.format(today=date.today(), store_name=settings.store_name)),
+        SystemMessage(content=_SYSTEM.format(today=date.today(), store_name=_get_store_name())),
         HumanMessage(content=question),
     ]
 

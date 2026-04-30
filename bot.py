@@ -222,7 +222,7 @@ def _prompt_for_right_side(manual_rules=None) -> str:
     if manual_rules:
         lines = "\n".join(f"{r.label}:   " for r in manual_rules)
     else:
-        lines = "IN. LOTTO:   \nON. LINE:    \nLOTTO PO:    \nLOTTO CR:    \nFOOD STAMP:  "
+        lines = "No manual fields configured."
     return (
         "\n\n📋 *Please reply with these numbers:*\n"
         "_(Enter 0 if none)_\n\n"
@@ -414,7 +414,7 @@ def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
     """
     Parse user's right-side input.
     If manual_rules (list of DailyReportRule) are provided, builds keys_map from DB labels.
-    Falls back to Moraine hardcoded aliases when rules not loaded.
+    Falls back to legacy aliases only for the legacy Moraine store.
     Returns None if parsing fails.
     """
     def to_float(s: str) -> float:
@@ -429,8 +429,8 @@ def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
         for r in manual_rules:
             aliases = [r.label.lower(), r.field_name.replace("_", " ")]
             keys_map[r.field_name] = aliases
-    else:
-        # Hardcoded fallback (Moraine defaults)
+    elif get_active_store(required=False) == "moraine":
+        # Legacy fallback for the original single-store deployment only.
         keys_map = {
             "lotto_in":     ["in. lotto", "in lotto", "instant lotto", "instant lottery", "in.lotto"],
             "lotto_online": ["on. line", "on line", "online lotto", "online lottery", "online"],
@@ -438,6 +438,8 @@ def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
             "lotto_cr":     ["lotto cr", "lottocr", "lotto credit", "lotto cr."],
             "food_stamp":   ["food stamp", "foodstamp", "ebt", "food stamps", "snap"],
         }
+    else:
+        return None
 
     result: dict[str, float] = {}
     text_lower = text.lower()
@@ -671,8 +673,8 @@ async def scheduled_daily(app: Application) -> None:
 
     stores = await load_all_active_stores()
     if not stores:
-        # Fallback to settings if platform.stores not yet seeded (pre-migration)
-        stores_chat_ids = [(get_active_store(), settings.telegram_chat_id)]
+        log.error("Privacy guard: no active stores configured; scheduled daily skipped")
+        return
     else:
         stores_chat_ids = [(s.store_id, s.chat_id) for s in stores]
 
@@ -1482,10 +1484,10 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
             return
 
         # ── Natural language edit ("change card to 1300", "lotto payout 500") ──
-        # Only run for Moraine (legacy hardcoded fields). Hamilton/other stores
+        # Only run for the legacy Moraine store (legacy hardcoded fields). Other stores
         # skip this — _parse_sales_edit's prompt assumes Moraine's field names
         # and would hallucinate wrong fields for other layouts.
-        if not store_rules or store_name == "Moraine Foodmart":
+        if get_active_store() == "moraine":
             edits = await asyncio.to_thread(_parse_sales_edit, text, sales)
             if edits:
                 sales.update(edits)
@@ -2145,7 +2147,7 @@ async def _get_active_chat_id(default: str | None = None) -> str:
                 return store.chat_id
     except Exception as e:
         log.warning("Could not resolve active store chat_id: %s", e)
-    return default or settings.telegram_chat_id
+    return default or ""
 
 
 async def _send_invoice_paid_alert(bot: Bot, inv: dict) -> None:

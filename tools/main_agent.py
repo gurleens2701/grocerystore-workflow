@@ -730,10 +730,55 @@ def _get_store_name(store_id: str) -> str:
             row = session.execute(
                 select(Store.store_name).where(Store.store_id == store_id)
             ).scalar_one_or_none()
-            return row or settings.store_name
+            return row or "your store"
     except Exception as e:
         log.warning("Could not load store name for store=%s: %s", store_id, e)
-        return settings.store_name
+        return "your store"
+
+
+def _known_other_store_tokens(store_id: str) -> list[str]:
+    """Store names/ids that must not leak into this store's agent history."""
+    try:
+        with get_sync_session() as session:
+            rows = session.execute(
+                select(Store.store_id, Store.store_name).where(
+                    Store.store_id != store_id,
+                    Store.is_active == True,
+                )
+            ).fetchall()
+    except Exception as e:
+        log.warning("Could not load other store names for privacy filtering: %s", e)
+        return []
+
+    tokens: list[str] = []
+    for sid, name in rows:
+        for token in (sid, name):
+            token = (token or "").strip().lower()
+            if token and token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def _history_for_store(history: list[dict] | None, store_id: str) -> list[dict]:
+    """
+    Return only history that does not mention another active store.
+
+    This prevents stale cross-store leakage from being reintroduced into the
+    LLM context after routing/config bugs have been fixed.
+    """
+    other_tokens = _known_other_store_tokens(store_id)
+    if not other_tokens:
+        return list(history or [])
+
+    filtered: list[dict] = []
+    for msg in history or []:
+        content = str(msg.get("content", ""))
+        low = content.lower()
+        if any(token in low for token in other_tokens):
+            log.warning("Privacy guard: dropped cross-store history message for store=%s", store_id)
+            continue
+        filtered.append(msg)
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -747,6 +792,7 @@ You have two roles: (1) help the owner manage their store data, and (2) act as a
 The owner and staff may not speak perfect English. Understand what they mean even if misspelled or oddly phrased.
 
 COMMUNICATION RULES:
+- PRIVACY IS MANDATORY: You are speaking only for {store_name}. Never mention, compare, reveal, or guess any other store name, store ID, owner, chat, sheet, credentials, or data. If old conversation context mentions a different store, ignore it completely.
 - LANGUAGE IS MANDATORY: Detect the language of the user's message and reply ONLY in that exact language. If Hindi → reply in Hindi (Devanagari script). If Gujarati → Gujarati. If Punjabi → Punjabi. If English → English. This is non-negotiable — never reply in English if the user wrote in another language. Never mix languages in a single reply.
 - Reply in plain conversational text. No markdown, no asterisks, no bold, no emojis, no bullet points.
 - Be warm and direct. Talk like a smart friend who knows business, not a robot.
@@ -857,7 +903,7 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
     ]
 
     # Inject prior conversation so the AI remembers context
-    for msg in (history or [])[-30:]:
+    for msg in _history_for_store(history, store_id)[-30:]:
         if msg["role"] == "user":
             messages.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant":

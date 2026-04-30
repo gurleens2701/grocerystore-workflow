@@ -357,6 +357,8 @@ async def process_message(text: str, store_id: str) -> str:
     Process a web chat message exactly like the Telegram bot.
     Returns a reply string.
     """
+    from config.store_context import set_active_store
+    set_active_store(store_id)
     text = text.strip()
 
     # ── /command shortcuts ────────────────────────────────────────────────────
@@ -364,9 +366,18 @@ async def process_message(text: str, store_id: str) -> str:
 
     if lower.startswith("/daily"):
         try:
-            sales = await asyncio.to_thread(fetch_daily_sales)
+            from config.store_registry import load_store
+            from tools.pos.dispatcher import fetch_daily_sales as dispatch_fetch
+            from bot import _fmt_left, _prompt_for_right_side
+            store = await load_store(store_id=store_id)
+            if not store:
+                return "Store is not configured."
+            sales = await dispatch_fetch(store, None)
             await save_state(store_id, _STATE_SALES, sales)
-            return _fmt_left(sales) + _prompt_for_right_side()
+            return (
+                _fmt_left(sales, rules=store.daily_report_rules, store_name=store.store_name)
+                + _prompt_for_right_side(store.get_manual_rules())
+            )
         except Exception as e:
             log.error("Daily fetch failed: %s", e, exc_info=True)
             return f"❌ Error fetching data: {e}"
@@ -412,9 +423,33 @@ async def process_message(text: str, store_id: str) -> str:
     # ── Priority 1: pending daily sheet ──────────────────────────────────────
     sales = await get_state(store_id, _STATE_SALES)
     if sales:
-        right = _parse_right_side(text)
+        from config.store_registry import load_store
+        from bot import (
+            _build_complete_sheet as _build_complete_sheet_rules,
+            _build_pending_report_context,
+            _looks_like_business_question,
+            _parse_right_side as _parse_right_side_rules,
+        )
+        store = await load_store(store_id=store_id)
+        manual_rules = store.get_manual_rules() if store else None
+        store_rules = store.daily_report_rules if store else None
+        store_name = store.store_name if store else "Store"
+
+        if _looks_like_business_question(text):
+            from tools.main_agent import run_agent
+            question = f"{_build_pending_report_context(sales, store)}\n\nOwner says: {text}"
+            return await asyncio.to_thread(run_agent, question, store_id)
+
+        right = _parse_right_side_rules(text, manual_rules)
         if right is not None:
-            sheet_msg = _build_complete_sheet(sales, right)
+            sales.update(right)
+            manual_values = dict(sales.get("_manual_values") or {})
+            manual_values.update(right)
+            sales["_manual_values"] = manual_values
+            await save_state(store_id, _STATE_SALES, sales)
+            sheet_msg = _build_complete_sheet_rules(
+                sales, right, rules=store_rules, store_name=store_name
+            )
             try:
                 sales_for_sheet = dict(sales)
                 sales_for_sheet.update(right)
@@ -427,7 +462,9 @@ async def process_message(text: str, store_id: str) -> str:
                 await clear_state(store_id, _STATE_SALES)
                 return sheet_msg + f"\n\n⚠️ Sheets logging failed: {e}"
         else:
-            return "⚠️ Could not parse. Reply with:\nLOTTO PO: 16\nLOTTO CR: 0\nFOOD STAMP: 27.97"
+            from tools.main_agent import run_agent
+            question = f"{_build_pending_report_context(sales, store)}\n\nOwner says: {text}"
+            return await asyncio.to_thread(run_agent, question, store_id)
 
     # ── Priority 2: pending invoice confirmation ──────────────────────────────
     pending_items = await get_state(store_id, _STATE_INVOICE_ITEMS)
@@ -481,9 +518,18 @@ async def process_message(text: str, store_id: str) -> str:
 
     if intent == "daily_fetch":
         try:
-            sales = await asyncio.to_thread(fetch_daily_sales)
+            from config.store_registry import load_store
+            from tools.pos.dispatcher import fetch_daily_sales as dispatch_fetch
+            from bot import _fmt_left, _prompt_for_right_side
+            store = await load_store(store_id=store_id)
+            if not store:
+                return "Store is not configured."
+            sales = await dispatch_fetch(store, None)
             await save_state(store_id, _STATE_SALES, sales)
-            return _fmt_left(sales) + _prompt_for_right_side()
+            return (
+                _fmt_left(sales, rules=store.daily_report_rules, store_name=store.store_name)
+                + _prompt_for_right_side(store.get_manual_rules())
+            )
         except Exception as e:
             log.error("Daily fetch failed: %s", e, exc_info=True)
             return f"❌ Error fetching data: {e}"

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # Store identity
     store_id: str = "moraine"
-    store_name: str = "Moraine Foodmart"
+    store_name: str = "Store"
     timezone: str = "America/New_York"
 
     # Anthropic

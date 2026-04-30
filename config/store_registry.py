@@ -204,11 +204,19 @@ async def load_store(*, chat_id: str | None = None, store_id: str | None = None)
 
     async with get_async_session() as session:
         if chat_id:
-            row = (await session.execute(
+            rows = (await session.execute(
                 select(Store)
                 .where(Store.chat_id == str(chat_id), Store.is_active == True)
                 .order_by(Store.created_at.desc())
-            )).scalars().first()
+            )).scalars().all()
+            if len(rows) > 1:
+                log.error(
+                    "Privacy guard: chat_id=%s matches multiple active stores: %s",
+                    chat_id,
+                    [r.store_id for r in rows],
+                )
+                return None
+            row = rows[0] if rows else None
         else:
             row = (await session.execute(
                 select(Store).where(Store.store_id == store_id, Store.is_active == True)

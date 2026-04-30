@@ -9,16 +9,43 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from config.settings import settings
+from config.store_context import get_active_store
 
 
 def _bot() -> Bot:
     return Bot(token=settings.telegram_bot_token)
 
 
+def _active_store_profile() -> tuple[str, str]:
+    """Return (store_name, chat_id) for the active store, failing closed on chat."""
+    sid = get_active_store(required=False)
+    if not sid:
+        return "Store", ""
+    try:
+        from sqlalchemy import select
+        from db.database import get_sync_session
+        from db.models import Store
+        with get_sync_session() as session:
+            row = session.execute(
+                select(Store.store_name, Store.chat_id).where(
+                    Store.store_id == sid,
+                    Store.is_active == True,
+                )
+            ).first()
+            if row:
+                return row.store_name or "Store", row.chat_id
+    except Exception:
+        pass
+    return "Store", ""
+
+
 async def _send(text: str, parse_mode: str = ParseMode.MARKDOWN) -> None:
+    _, chat_id = _active_store_profile()
+    if not chat_id:
+        raise RuntimeError("No active store chat configured")
     async with _bot() as bot:
         await bot.send_message(
-            chat_id=settings.telegram_chat_id,
+            chat_id=chat_id,
             text=text,
             parse_mode=parse_mode,
         )
@@ -60,9 +87,10 @@ def send_daily_report(sales_data: dict[str, Any]) -> str:
     atm = sales_data.get("atm", 0)
     ebt = sales_data.get("ebt", 0)
     txns = sales_data.get("total_transactions", 0)
+    store_name, _ = _active_store_profile()
 
     msg = (
-        f"*📊 Moraine Foodmart Daily — {dow} {d}*\n"
+        f"*📊 {store_name} Daily — {dow} {d}*\n"
         f"{'─' * 32}\n"
         f"\n*PRODUCT SALES*\n"
         f"{dept_lines}\n"

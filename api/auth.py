@@ -59,7 +59,23 @@ async def authenticate_user(username: str, password: str) -> tuple[bool, list[st
 
         if user_count == 0:
             # No users in DB yet — fall back to .env credentials so existing
-            # setup doesn't break before create_user.py is run
+            # single-store setup doesn't break before create_user.py is run.
+            # Privacy guard: never allow settings fallback in multi-store mode,
+            # because .env credentials are not tied to per-store memberships.
+            from db.models import Store
+            active_store_count = (
+                await session.execute(
+                    select(sa_func.count()).select_from(Store).where(Store.is_active == True)
+                )
+            ).scalar_one()
+            if active_store_count > 1:
+                log.error(
+                    "Privacy guard: refused settings auth fallback with %s active stores. "
+                    "Run scripts/create_user.py and assign explicit memberships.",
+                    active_store_count,
+                )
+                return False, []
+
             log.warning(
                 "platform.users is empty — using settings fallback. "
                 "Run scripts/create_user.py to create proper accounts."

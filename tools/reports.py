@@ -8,10 +8,22 @@ Reports are stored as plain text files at:
 from datetime import date, datetime
 from pathlib import Path
 
-from config.settings import settings
-
 # Root reports directory relative to project root
 _REPORTS_ROOT = Path("reports")
+
+
+def _store_name(store_id: str) -> str:
+    try:
+        from sqlalchemy import select
+        from db.database import get_sync_session
+        from db.models import Store
+        with get_sync_session() as session:
+            name = session.execute(
+                select(Store.store_name).where(Store.store_id == store_id)
+            ).scalar_one_or_none()
+            return name or "Store"
+    except Exception:
+        return "Store"
 
 
 def _parse_date(report_date) -> date:
@@ -100,7 +112,7 @@ def save_daily_report(store_id: str, sales: dict, right: dict) -> Path:
 
     # ── Build report lines ────────────────────────────────────────────────────
     lines = [
-        settings.store_name.upper(),
+        _store_name(store_id).upper(),
         f"DATE:  {sales.get('day_of_week', '')} {sales.get('date', '')}",
         SEP,
         "",

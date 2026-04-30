@@ -128,19 +128,7 @@ async def run_bot() -> None:
     stores = await load_all_active_stores()
 
     if not stores:
-        # Fallback: no stores in DB yet — register Moraine's jobs from settings
-        log.warning("No active stores in platform.stores — falling back to settings-based scheduling")
-        from bot import scheduled_daily
-        scheduler.add_job(
-            scheduled_daily, args=[app],
-            trigger=CronTrigger(hour=7, minute=0, timezone=tz),
-            id="daily_fetch_fallback", replace_existing=True,
-        )
-        scheduler.add_job(
-            run_nightly_sync, args=[settings.store_id],
-            trigger=IntervalTrigger(minutes=15),
-            id="nightly_sync_fallback", replace_existing=True, misfire_grace_time=600,
-        )
+        log.error("Privacy guard: no active stores in platform.stores; no store jobs registered")
     else:
         registered = 0
         for store in stores:
