@@ -450,8 +450,13 @@ def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
                 result[key] = to_float(m.group(1))
                 break
 
-    # If no key matched, try plain number list matching the rule count
+    # If no key matched, try plain number list matching the rule count.
+    # This must only apply to replies that are actually just numbers. Otherwise
+    # normal questions with dates ("department sales on April 27 2026") get
+    # mistaken for manual sheet inputs while a daily report is pending.
     if not result:
+        if not re.fullmatch(r"[\s,$\d.]+", text):
+            return None
         nums = re.findall(r"\d+\.?\d*", text)
         n_rules = len(manual_rules) if manual_rules else 0
         field_order = [r.field_name for r in manual_rules] if manual_rules else []
@@ -467,6 +472,24 @@ def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
             return None
 
     return result
+
+
+def _looks_like_business_question(text: str) -> bool:
+    """True when a pending daily sheet should not hijack a normal data question."""
+    clean = text.strip().lower()
+    if "?" in clean:
+        return True
+    starters = (
+        "what ", "whats ", "what's ", "how ", "show ", "tell ", "give ",
+        "list ", "which ", "when ", "why ", "where ",
+    )
+    if clean.startswith(starters):
+        return True
+    query_terms = (
+        "department sales", "dept sales", "sales on", "sales for",
+        "my sales", "total sales", "daily sales", "grand total",
+    )
+    return any(term in clean for term in query_terms)
 
 
 # ---------------------------------------------------------------------------
@@ -1326,6 +1349,7 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         store_rules = None
         store_name = "Store"
         manual_rules = None
+        _store = None
         try:
             _store = await load_store(chat_id=str(update.effective_chat.id))
             if _store:
@@ -1342,6 +1366,26 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
                 "Daily report cancelled. What do you need?",
                 parse_mode=None,
             )
+            return
+
+        # ── Store/data questions should still work while a report is pending ──
+        # The owner may ask "what were department sales on April 27 2026?"
+        # before finishing today's sheet. Do not treat dates in those questions
+        # as manual sheet numbers.
+        if _looks_like_business_question(text):
+            from tools.main_agent import run_agent
+            history = await _load_history(get_active_store())
+            question = f"{_build_pending_report_context(sales, _store)}\n\nOwner says: {text}"
+            try:
+                reply = await asyncio.to_thread(run_agent, question, get_active_store(), owner_name, history)
+                await update.message.reply_text(reply, parse_mode=None)
+                await _save_history(get_active_store(), history, text, reply)
+            except Exception as e:
+                log.error("Agent failed inside sales state: %s", e, exc_info=True)
+                await update.message.reply_text(
+                    "Sorry, I hit an error. Try again?",
+                    parse_mode=None,
+                )
             return
 
         # ── Save / confirm ───────────────────────────────────────────────────
@@ -1395,12 +1439,13 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         # they likely meant manual values — ask for clarification rather than
         # letting the agent guess (or _parse_sales_edit hallucinate).
         digits_only = re.findall(r"\d+\.?\d*", text)
+        is_plain_number_reply = bool(re.fullmatch(r"[\s,$\d.]+", text))
         has_label = any(
             re.search(re.escape(r.label.lower()), text.lower()) or
             re.search(re.escape(r.field_name.replace("_", " ")), text.lower())
             for r in (manual_rules or [])
         ) if manual_rules else False
-        if digits_only and not has_label and manual_rules:
+        if digits_only and is_plain_number_reply and not has_label and manual_rules:
             manual_values = dict(sales.get("_manual_values") or {})
             missing_rules = [r for r in manual_rules if r.field_name not in manual_values]
             if 0 < len(digits_only) <= len(missing_rules):
@@ -1460,8 +1505,8 @@ async def handle_plain_text_invoice(update: Update, context: ContextTypes.DEFAUL
         from tools.main_agent import run_agent
         history = await _load_history(get_active_store())
         try:
-            reply = await asyncio.to_thread(run_agent, text, get_active_store(), owner_name, history
-            )
+            question = f"{_build_pending_report_context(sales, _store)}\n\nOwner says: {text}"
+            reply = await asyncio.to_thread(run_agent, question, get_active_store(), owner_name, history)
             await update.message.reply_text(reply, parse_mode=None)
             await _save_history(get_active_store(), history, text, reply)
         except Exception as e:
