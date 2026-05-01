@@ -623,6 +623,9 @@ async def _do_daily_fetch(bot: Bot, chat_id: str, target_date: str = "") -> bool
             )
         else:
             msg = f"❌ Error fetching data: {err_text}"
+            await bot.send_message(chat_id=chat_id, text=msg, parse_mode=None)
+            asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", msg))
+            return False
         await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
         asyncio.create_task(log_message(get_active_store(), "telegram", "bot", "Bot", msg))
         return False

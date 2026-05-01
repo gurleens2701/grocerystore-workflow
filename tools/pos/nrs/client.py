@@ -199,7 +199,7 @@ async def fetch_raw_stats(target_date: date) -> dict[str, Any]:
             r.raise_for_status()
             return r.json().get("data", {})
     except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
+        if e.response.status_code in (401, 403):
             clear_cached_token_sync(get_active_store())
             raise NRSTokenExpiredError(
                 "NRS session expired. Send /token <value> in Telegram to set a new one."
@@ -217,7 +217,7 @@ async def fetch_raw_inventory() -> dict[str, Any]:
             r.raise_for_status()
             return r.json().get("merchant", {})
     except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
+        if e.response.status_code in (401, 403):
             clear_cached_token_sync(get_active_store())
             raise NRSTokenExpiredError(
                 "NRS session expired. Send /token <value> in Telegram to set a new one."
