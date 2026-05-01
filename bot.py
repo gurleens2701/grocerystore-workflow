@@ -117,6 +117,7 @@ FIELD_NAME_ALIASES = {
     "lotto_payout": "lotto_po",   # Modisoft uses lotto_payout
     "vendor":       "vendor_payout",
     "check":        "check_amount",
+    "cash_drop":    "cash_drops",  # NRS transformer returns cash_drops
 }
 
 # Field name → canonical.daily_sales column name. If a field's not here, it goes
