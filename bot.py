@@ -239,14 +239,14 @@ def _fmt_left(sales: dict[str, Any], rules: list = None, store_name: str = "Stor
     return "\n".join(lines)
 
 
-def _build_manual_input_prompt(manual_rules: list) -> str:
+def _prompt_for_right_side(manual_rules: list) -> str:
     """
     Build the prompt asking the owner to reply with manual field values.
-    
+
     `manual_rules` comes from platform.store_daily_report_rules (rows
     where source='manual'), already loaded by the caller via
     StoreProfile.get_manual_rules().
-    
+
     Raises ValueError if manual_rules is empty — that means the store
     isn't fully onboarded, which is a configuration bug we want loud
     (not a confusing message to the owner).
@@ -256,7 +256,7 @@ def _build_manual_input_prompt(manual_rules: list) -> str:
             "No manual fields configured for this store — check "
             "platform.store_daily_report_rules"
         )
-    
+
     lines = "\n".join(f"{r.label}:   " for r in manual_rules)
     return (
         "\n\n📋 *Please reply with these numbers:*\n"
