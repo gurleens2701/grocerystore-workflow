@@ -81,9 +81,12 @@ def transform_daily_sales(raw: dict, target_date: date) -> dict:
     lotto_payout = round(lotto_payout, 2)
     pull_tab = round(pull_tab, 2)
 
-    # ATM + coupon from Services/Misc dept types
+    # ATM, coupon, money order, check fee, bill pay — all from Services/Misc dept types
     atm = 0.0
     coupon = 0.0
+    money_order = 0.0
+    check_fee = 0.0
+    bill_pay = 0.0
     for d in grocery:
         name = (d.get("DeptName") or "").strip().upper()
         net = float(d.get("NetSales", 0) or 0)
@@ -91,8 +94,17 @@ def transform_daily_sales(raw: dict, target_date: date) -> dict:
             atm += abs(net)
         elif "COUPON" in name:
             coupon += abs(net)
+        elif "MONEY ORDER" in name:
+            money_order += abs(net)
+        elif "CHECK CASH" in name or "CHECK FEE" in name:
+            check_fee += abs(net)
+        elif "BILL PAY" in name:
+            bill_pay += abs(net)
     atm = round(atm, 2)
     coupon = round(coupon, 2)
+    money_order = round(money_order, 2)
+    check_fee = round(check_fee, 2)
+    bill_pay = round(bill_pay, 2)
 
     # Sales tax straight from FinancialData
     sales_tax = round(float(financial.get("SalesTax", 0) or 0), 2)
@@ -191,6 +203,9 @@ def transform_daily_sales(raw: dict, target_date: date) -> dict:
         "food_stamp": food_stamp,
         "vendor": vendor,
         "paid_in": paid_in,
+        "money_order": money_order,
+        "check_fee": check_fee,
+        "bill_pay": bill_pay,
         "total_payments": total_payments,
         # --- Misc ---
         "cash_drop": cash_drop,
