@@ -1,12 +1,26 @@
 """
-Interactive Telegram bot for Moraine Foodmart daily sheet.
+Interactive Telegram bot — multi-store entry point.
 
-Daily flow:
-  1. Scheduler fires at 7 AM → fetches NRS data → sends LEFT SIDE to Telegram
-  2. Bot asks owner for right-side numbers (lotto payout, ATM, coupon, etc.)
-  3. Owner replies → bot builds complete sheet, calculates over/short
-  4. Bot sends the final complete daily sheet
-  5. Bot logs everything to Google Sheets
+Routes Telegram messages by chat_id → store_id (via platform.stores)
+and runs each store's daily report flow based on its config in the
+platform schema.
+
+Daily flow (per store, scheduled by platform.store_scheduler_policies):
+  1. Scheduler fires the daily_fetch job for each active store
+  2. POS dispatcher routes to the right connector (NRS, Modisoft, etc.)
+     based on store.pos_type
+  3. Raw POS data → transformer → canonical format
+  4. Bot renders the daily sheet using rules from
+     platform.store_daily_report_rules
+  5. Owner replies with manual fields → bot builds complete sheet,
+     calculates over/short
+  6. Saves to canonical.daily_sales and the store's Google Sheet
+
+Per-store isolation: every request sets active_store contextvar via
+_guard_known_store. All downstream queries filter by store_id.
+
+Privacy gate: _guard_known_store (registered with group=-1) rejects
+messages from any chat_id not in platform.stores with is_active=true.
 """
 
 import asyncio
@@ -120,6 +134,16 @@ FIELD_NAME_ALIASES = {
     "cash_drop":    "cash_drops",  # NRS transformer returns cash_drops
 }
 
+# Field-name suffixes that indicate non-dollar units. These are displayed on
+# the daily sheet but excluded from GRAND TOTAL since you can't sum gallons
+# and dollars together. Add new suffixes here as needed (e.g. "_count", "_pct").
+_NON_DOLLAR_SUFFIXES = ("_gallons",)
+
+
+def _is_dollar_field(field_name: str) -> bool:
+    """True if the field is dollar-denominated and safe to add into a $ total."""
+    return not field_name.endswith(_NON_DOLLAR_SUFFIXES)
+
 # Field name → canonical.daily_sales column name. If a field's not here, it goes
 # into extra_fields JSONB (no schema migration needed for store-specific fields).
 DAILY_SALES_COLUMNS = {
@@ -178,7 +202,8 @@ def _fmt_left(sales: dict[str, Any], rules: list = None, store_name: str = "Stor
             left_body_lines.append(f"  {r.label:<20} {'[awaiting]':>9}")
         else:
             left_body_lines.append(f"  {r.label:<20} ${val:>8.2f}")
-            grand_total_components += val
+            if _is_dollar_field(r.field_name):
+                grand_total_components += val
 
     # Update sales dict so callers see the running grand_total estimate (manual=0)
     sales["grand_total"] = round(grand_total_components, 2)
@@ -214,21 +239,31 @@ def _fmt_left(sales: dict[str, Any], rules: list = None, store_name: str = "Stor
     return "\n".join(lines)
 
 
-def _prompt_for_right_side(manual_rules=None) -> str:
+def _build_manual_input_prompt(manual_rules: list) -> str:
     """
-    Build the 'please enter these numbers' prompt.
-    If manual_rules (list of DailyReportRule) are provided, uses labels from DB.
-    Falls back to Moraine hardcoded values when rules not yet loaded.
+    Build the prompt asking the owner to reply with manual field values.
+    
+    `manual_rules` comes from platform.store_daily_report_rules (rows
+    where source='manual'), already loaded by the caller via
+    StoreProfile.get_manual_rules().
+    
+    Raises ValueError if manual_rules is empty — that means the store
+    isn't fully onboarded, which is a configuration bug we want loud
+    (not a confusing message to the owner).
     """
-    if manual_rules:
-        lines = "\n".join(f"{r.label}:   " for r in manual_rules)
-    else:
-        lines = "No manual fields configured."
+    if not manual_rules:
+        raise ValueError(
+            "No manual fields configured for this store — check "
+            "platform.store_daily_report_rules"
+        )
+    
+    lines = "\n".join(f"{r.label}:   " for r in manual_rules)
     return (
         "\n\n📋 *Please reply with these numbers:*\n"
         "_(Enter 0 if none)_\n\n"
         f"```\n{lines}\n```"
     )
+
 
 
 def _manual_fields_text(manual_rules=None) -> str:
@@ -280,7 +315,8 @@ def _build_complete_sheet(sales: dict[str, Any], right: dict[str, float],
     for r in left_rules:
         val = _resolve_value(r.field_name, sales, right)
         left_lines.append(f"  {r.label:<20} ${val:>8.2f}")
-        grand_total += val
+        if _is_dollar_field(r.field_name):
+            grand_total += val
     grand_total = round(grand_total, 2)
 
     # Department breakdown (auto from API)
@@ -413,11 +449,10 @@ def _build_preview(sales: dict, rules: list = None, store_name: str = "Store") -
 
 def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
     """
-    Parse user's right-side input.
-    If manual_rules (list of DailyReportRule) are provided, builds keys_map from DB labels.
-    Falls back to legacy aliases only for the legacy Moraine store.
-    Returns None if parsing fails.
+    Parse user's right-side input using DB-loaded manual rules.
+    Returns None if manual_rules is empty or no fields could be matched.
     """
+
     def to_float(s: str) -> float:
         try:
             return round(float(s.replace(",", "").replace("$", "")), 2)
@@ -430,15 +465,7 @@ def _parse_right_side(text: str, manual_rules=None) -> dict[str, float] | None:
         for r in manual_rules:
             aliases = [r.label.lower(), r.field_name.replace("_", " ")]
             keys_map[r.field_name] = aliases
-    elif get_active_store(required=False) == "moraine":
-        # Legacy fallback for the original single-store deployment only.
-        keys_map = {
-            "lotto_in":     ["in. lotto", "in lotto", "instant lotto", "instant lottery", "in.lotto"],
-            "lotto_online": ["on. line", "on line", "online lotto", "online lottery", "online"],
-            "lotto_po":     ["lotto po", "lotto p.o", "lottopo", "lotto payout", "payout"],
-            "lotto_cr":     ["lotto cr", "lottocr", "lotto credit", "lotto cr."],
-            "food_stamp":   ["food stamp", "foodstamp", "ebt", "food stamps", "snap"],
-        }
+    
     else:
         return None
 
