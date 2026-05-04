@@ -483,45 +483,79 @@ def get_daily_sheet_column(store_id: str, field_name: str) -> int | None:
 
 
 def log_daily_sales(sales_data: dict[str, Any]) -> str:
+    """Write daily sales to Google Sheet using store_sheet_mappings from DB.
+
+    Column layout comes from platform.store_sheet_mappings for the active store.
+
+    For dept.X field_names, X is matched against department names two ways:
+      1. Direct lowercase match (e.g. "BEER" → dept.beer for Modisoft)
+      2. Normalized short key via _DEPT_COL_MAP (e.g. "Cigarettes" → dept.cigs for NRS)
+    Both layers coexist so existing NRS (Moraine) mappings need no DB changes.
+
+    Un-mapped fields produce a WARNING log line and are left blank — no crash, no guess.
+    Single batched worksheet.update() call; no per-cell writes.
+    """
+    import logging as _logging
+    from sqlalchemy import select as _select
+    from db.database import get_sync_session as _get_sync_session
+    from db.models import StoreSheetMapping as _Mapping
+    from config.store_context import get_active_store as _get_active_store
+
+    _log = _logging.getLogger(__name__)
+    store_id = _get_active_store()
     target_date = date.fromisoformat(sales_data.get("date", str(date.today())))
+
+    with _get_sync_session() as _sess:
+        mappings = _sess.execute(
+            _select(_Mapping).where(
+                _Mapping.store_id == store_id,
+                _Mapping.section == "daily_sales",
+            )
+        ).scalars().all()
+
+    if not mappings:
+        raise ValueError(
+            f"No sheet mappings for store '{store_id}' section 'daily_sales'. "
+            "Populate platform.store_sheet_mappings."
+        )
+
+    max_col = max(m.column_index for m in mappings)
+    row_data: list[Any] = [""] * max_col
+
+    # Build dept lookup: both direct lowercase name AND _DEPT_COL_MAP short key.
+    # Direct: Modisoft returns "BEER" → "beer" matches dept.beer.
+    # Short key: NRS returns "Cigarettes" → _DEPT_COL_MAP maps it to "cigs" → matches dept.cigs.
+    dept_vals: dict[str, float] = {}
+    for d in sales_data.get("departments", []):
+        raw_lower = d["name"].lower()
+        dept_vals[raw_lower] = d.get("sales", 0)
+        short_key = _DEPT_COL_MAP.get(raw_lower)
+        if short_key:
+            dept_vals[short_key] = d.get("sales", 0)
+
+    for m in mappings:
+        col_idx = m.column_index - 1  # 0-based
+        field = m.field_name
+
+        if field == "date":
+            row_data[col_idx] = sales_data.get("date", "")
+        elif field.startswith("dept."):
+            dept_key = field[5:]  # strip "dept."
+            val = dept_vals.get(dept_key)
+            if val is not None:
+                row_data[col_idx] = val
+            else:
+                _log.warning("store=%s: dept '%s' not in today's data; leaving blank", store_id, dept_key)
+        else:
+            val = sales_data.get(field)
+            if val is None:
+                _log.warning("store=%s: field '%s' not in sales_data; leaving blank", store_id, field)
+            else:
+                row_data[col_idx] = val
+
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, target_date)
-
-    dept_vals: dict[str, float] = {}
-    for d in sales_data.get("departments", []):
-        col = _DEPT_COL_MAP.get(d["name"].lower())
-        if col:
-            dept_vals[col] = d.get("sales", 0)
-
-    row_data = [
-        sales_data.get("date", ""),
-        dept_vals.get("beer", 0),   dept_vals.get("cigs", 0),
-        dept_vals.get("dairy", 0),  dept_vals.get("n_tax", 0),
-        dept_vals.get("tax", 0),    dept_vals.get("ice", 0),
-        dept_vals.get("lbait", 0),  dept_vals.get("pizza", 0),
-        dept_vals.get("pop", 0),    dept_vals.get("preroll", 0),
-        dept_vals.get("tobbaco", 0),dept_vals.get("vape", 0),
-        dept_vals.get("wine", 0),   dept_vals.get("propane", 0),
-        sales_data.get("product_sales", 0),
-        sales_data.get("lotto_online", 0),
-        sales_data.get("lotto_in", 0),
-        sales_data.get("lotto_po", 0),
-        sales_data.get("lotto_cr", 0),
-        sales_data.get("atm", 0),
-        sales_data.get("cash_drops", 0),
-        sales_data.get("check", 0),
-        sales_data.get("card", 0),
-        sales_data.get("coupon", 0),
-        sales_data.get("pull_tab", 0),
-        sales_data.get("sales_tax", 0),
-        dept_vals.get("payin", 0),
-        sales_data.get("food_stamp", 0),
-        sales_data.get("vendor", 0),
-        "",
-        sales_data.get("loyalty", 0),
-        sales_data.get("grand_total", 0),
-    ]
 
     target_row = _DAILY_DATA_START + target_date.day - 1
     col_end = gspread.utils.rowcol_to_a1(target_row, len(row_data))
