@@ -31,6 +31,23 @@ import tools.sheets_tools as sheets_tools
 from tools.sheets_tools import resolve_vendor, VENDOR_ALIAS_MAP
 
 
+def _use_legacy_sheet_sections() -> bool:
+    """Return True if the active store uses Moraine-style hardcoded sheet sections.
+
+    Moraine (NRS) has a fixed sheet layout with EXPENSES, COGS, PAYROLL, REVENUE
+    sections at hardcoded row positions. Modisoft stores and future stores use a
+    different sheet structure — for those, agent writes go to DB only.
+    """
+    try:
+        with get_sync_session() as session:
+            row = session.execute(
+                select(Store).where(Store.store_id == get_active_store())
+            ).scalar_one_or_none()
+            return (row.pos_type if row else "nrs") == "nrs"
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Date parsing helper
 # ---------------------------------------------------------------------------
@@ -409,10 +426,11 @@ def log_expense(category: str, amount: float, date_str: str = "") -> str:
             ))
             action = "Logged"
 
-    try:
-        sheets_tools.log_expense(category, amount, entry_date)
-    except Exception as e:
-        return f"{action} expense in DB: {cat} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+    if _use_legacy_sheet_sections():
+        try:
+            sheets_tools.log_expense(category, amount, entry_date)
+        except Exception as e:
+            return f"{action} expense in DB: {cat} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
     return f"{action} expense: {cat} ${amount:.2f} on {entry_date}"
 
@@ -467,10 +485,11 @@ def log_invoice(vendor: str, amount: float, date_str: str = "") -> str:
             ))
             action = "Logged"
 
-    try:
-        sheets_tools.log_cogs_entry(vendor=resolved, amount=amount, entry_date=entry_date)
-    except Exception as e:
-        return f"{action} invoice in DB: {resolved} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+    if _use_legacy_sheet_sections():
+        try:
+            sheets_tools.log_cogs_entry(vendor=resolved, amount=amount, entry_date=entry_date)
+        except Exception as e:
+            return f"{action} invoice in DB: {resolved} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
     return f"{action} invoice: {resolved} ${amount:.2f} on {entry_date}"
 
@@ -509,10 +528,11 @@ def log_rebate(vendor: str, amount: float, date_str: str = "") -> str:
             ))
             action = "Logged"
 
-    try:
-        sheets_tools.log_rebate(vendor, amount, entry_date)
-    except Exception as e:
-        return f"{action} rebate in DB: {v} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+    if _use_legacy_sheet_sections():
+        try:
+            sheets_tools.log_rebate(vendor, amount, entry_date)
+        except Exception as e:
+            return f"{action} rebate in DB: {v} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
     return f"{action} rebate: {v} ${amount:.2f} on {entry_date}"
 
@@ -552,10 +572,11 @@ def log_payroll(employee: str, amount: float, date_str: str = "") -> str:
             ))
             action = "Logged"
 
-    try:
-        sheets_tools.log_payroll(employee, amount, entry_date)
-    except Exception as e:
-        return f"{action} payroll in DB: {employee} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+    if _use_legacy_sheet_sections():
+        try:
+            sheets_tools.log_payroll(employee, amount, entry_date)
+        except Exception as e:
+            return f"{action} payroll in DB: {employee} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
     return f"{action} payroll: {employee} ${amount:.2f} on {entry_date}"
 
@@ -594,10 +615,11 @@ def log_revenue(category: str, amount: float, date_str: str = "") -> str:
             ))
             action = "Logged"
 
-    try:
-        sheets_tools.log_revenue(category, amount, entry_date)
-    except Exception as e:
-        return f"{action} revenue in DB: {cat} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
+    if _use_legacy_sheet_sections():
+        try:
+            sheets_tools.log_revenue(category, amount, entry_date)
+        except Exception as e:
+            return f"{action} revenue in DB: {cat} ${amount:.2f} on {entry_date}. Sheet update failed: {e}"
 
     return f"{action} revenue: {cat} ${amount:.2f} on {entry_date}"
 

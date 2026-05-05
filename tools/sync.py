@@ -369,9 +369,10 @@ async def run_nightly_sync(store_id: str) -> None:
         # Skip for Modisoft stores — their canonical data comes from save_daily_sales()
         # in the bot flow. Reading their sheet back with Moraine's column map overwrites
         # correct data with wrong values.
-        from config.store_registry import get_store_profile as _gsp
-        _prof = _gsp(store_id)
-        if _prof and _prof.pos_type == "nrs":
+        from config.store_registry import load_store as _ls
+        _prof = await _ls(store_id=store_id)
+        _pos_type = _prof.pos_type if _prof else "nrs"
+        if _pos_type == "nrs":
             sales_count = await _sync_daily_sales(store_id, sheet, today, num_days)
         else:
             sales_count = 0
