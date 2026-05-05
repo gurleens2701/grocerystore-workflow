@@ -365,7 +365,18 @@ async def run_nightly_sync(store_id: str) -> None:
         import calendar
         num_days = calendar.monthrange(today.year, today.month)[1]
 
-        sales_count = await _sync_daily_sales(store_id, sheet, today, num_days)
+        # _sync_daily_sales uses Moraine's hardcoded DAILY_HEADERS column layout.
+        # Skip for Modisoft stores — their canonical data comes from save_daily_sales()
+        # in the bot flow. Reading their sheet back with Moraine's column map overwrites
+        # correct data with wrong values.
+        from config.store_registry import get_store_profile as _gsp
+        _prof = _gsp(store_id)
+        if _prof and _prof.pos_type == "nrs":
+            sales_count = await _sync_daily_sales(store_id, sheet, today, num_days)
+        else:
+            sales_count = 0
+            log.info("[%s] Skipping _sync_daily_sales — pos_type=%s (not NRS)", store_id, getattr(_prof, "pos_type", "unknown"))
+
         exp_count = await _sync_expenses(store_id, sheet, today, num_days)
         reb_count = await _sync_rebates(store_id, sheet, today, num_days)
         rev_count = await _sync_revenues(store_id, sheet, today, num_days)
