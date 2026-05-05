@@ -11,6 +11,12 @@ const DAILY_SALES_COLS: { key: string; label: string; auto?: boolean }[] = [
   { key: 'lotto_online', label: 'Lotto Online', auto: true },
   { key: 'sales_tax', label: 'Sales Tax', auto: true },
   { key: 'gpi', label: 'GPI', auto: true },
+  { key: 'money_order', label: 'Money Order', auto: true },
+  { key: 'check_fee', label: 'Check Fee', auto: true },
+  { key: 'bill_pay', label: 'Bill Pay', auto: true },
+  { key: 'gas_gallons', label: 'Gas (gal)', auto: true },
+  { key: 'gas_dollars', label: 'Gas ($)', auto: true },
+  { key: 'paid_in', label: 'Pay In', auto: true },
   { key: 'grand_total', label: 'Grand Total', auto: true },
   { key: 'cash_drop', label: 'Cash Drop' },
   { key: 'card', label: 'Card' },
@@ -23,6 +29,7 @@ const DAILY_SALES_COLS: { key: string; label: string; auto?: boolean }[] = [
   { key: 'food_stamp', label: 'Food Stamp' },
   { key: 'loyalty', label: 'Loyalty' },
   { key: 'vendor_payout', label: 'Payout' },
+  { key: 'cashed_checks', label: 'Cashed Checks' },
 ]
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

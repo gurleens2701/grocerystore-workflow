@@ -198,6 +198,10 @@ def _calc_over_short(r: DailySales) -> Optional[float]:
         "cash_drop", "card", "check_amount", "lotto_po", "lotto_cr",
         "atm", "pull_tab", "coupon", "food_stamp", "loyalty", "vendor_payout"
     ])
+    # Include extra payment fields stored in JSONB (e.g. cashed_checks for Hamilton)
+    extra = r.extra_fields or {}
+    for key in ("cashed_checks",):
+        total_payments += float(extra.get(key) or 0)
     return round(total_payments - float(r.grand_total or 0), 2)
 
 
@@ -444,6 +448,11 @@ def _sales_row_to_dict(r: DailySales) -> dict:
         "over_short": _calc_over_short(r),
         "total_transactions": r.total_transactions or 0,
         "departments": r.departments or [],
+        "extra_fields": r.extra_fields or {},
+        # Flatten known Modisoft-specific extra fields for dashboard display
+        **{k: float(v) for k, v in (r.extra_fields or {}).items()
+           if k in ("money_order", "check_fee", "gas_dollars", "gas_gallons",
+                    "paid_in", "bill_pay", "cashed_checks")},
     }
 
 

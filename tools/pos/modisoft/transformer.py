@@ -170,7 +170,12 @@ def transform_daily_sales(raw: dict, target_date: date) -> dict:
     # -----------------------------------------------------------------------
 
     other_subtotal = round(lotto_in + lotto_online + sales_tax + gpi, 2)
-    grand_total = round(product_sales + other_subtotal + gas_dollars, 2)
+    # grand_total includes all left-side revenue items (service fees, paid_in, gas)
+    grand_total = round(
+        product_sales + other_subtotal + gas_dollars
+        + money_order + bill_pay + check_fee + paid_in,
+        2,
+    )
     total_payments = round(cash + credit + debit + check + food_stamp, 2)
 
     return {
