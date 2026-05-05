@@ -505,6 +505,8 @@ def log_daily_sales(sales_data: dict[str, Any]) -> str:
     store_id = _get_active_store()
     target_date = date.fromisoformat(sales_data.get("date", str(date.today())))
 
+    from db.models import StoreDailyReportRule as _Rule
+
     with _get_sync_session() as _sess:
         mappings = _sess.execute(
             _select(_Mapping).where(
@@ -512,6 +514,21 @@ def log_daily_sales(sales_data: dict[str, Any]) -> str:
                 _Mapping.section == "daily_sales",
             )
         ).scalars().all()
+
+        # Pre-load right-side rules if computed total/over-short columns exist
+        _needs_computed = any(
+            m.field_name in ("sheet_total_payments", "sheet_over_short")
+            for m in mappings
+        )
+        right_rules = (
+            _sess.execute(
+                _select(_Rule).where(
+                    _Rule.store_id == store_id,
+                    _Rule.section == "right",
+                )
+            ).scalars().all()
+            if _needs_computed else []
+        )
 
     if not mappings:
         raise ValueError(
@@ -539,6 +556,19 @@ def log_daily_sales(sales_data: dict[str, Any]) -> str:
 
         if field == "date":
             row_data[col_idx] = sales_data.get("date", "")
+        elif field == "sheet_total_payments":
+            total_right = round(sum(
+                float(sales_data.get(r.field_name, 0) or 0)
+                for r in right_rules
+            ), 2)
+            row_data[col_idx] = total_right
+        elif field == "sheet_over_short":
+            total_right = round(sum(
+                float(sales_data.get(r.field_name, 0) or 0)
+                for r in right_rules
+            ), 2)
+            gt = float(sales_data.get("grand_total", 0) or 0)
+            row_data[col_idx] = round(total_right - gt, 2)
         elif field.startswith("dept."):
             dept_key = field[5:]  # strip "dept."
             val = dept_vals.get(dept_key)
