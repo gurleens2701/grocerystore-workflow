@@ -13,6 +13,12 @@ type Sale = {
   lotto_online: number
   sales_tax: number
   gpi: number
+  money_order?: number
+  bill_pay?: number
+  check_fee?: number
+  gas_gallons?: number
+  gas_dollars?: number
+  paid_in?: number
   grand_total: number
   cash_drop: number
   card: number
@@ -25,6 +31,7 @@ type Sale = {
   food_stamp: number
   loyalty: number
   vendor_payout: number
+  cashed_checks?: number
   total_transactions: number
   over_short: number | null
   departments: Dept[]
@@ -73,7 +80,7 @@ function ExpandedRow({ row }: { row: Sale }) {
   const rightTotal = (row.cash_drop || 0) + (row.card || 0) + (row.check_amount || 0)
     + (row.lotto_po || 0) + (row.lotto_cr || 0) + (row.atm || 0)
     + (row.pull_tab || 0) + (row.coupon || 0) + (row.food_stamp || 0)
-    + (row.loyalty || 0) + (row.vendor_payout || 0)
+    + (row.loyalty || 0) + (row.vendor_payout || 0) + (row.cashed_checks || 0)
 
   return (
     <tr className="bg-blue-50">
@@ -105,8 +112,14 @@ function ExpandedRow({ row }: { row: Sale }) {
             <div className="pt-1 space-y-1">
               <Row label="Lotto In"     value={row.lotto_in} />
               <Row label="Lotto Online" value={row.lotto_online} />
+              <Row label="M. Order"     value={row.money_order} />
+              <Row label="Bill Pay"     value={row.bill_pay} />
+              <Row label="Check Fee"    value={row.check_fee} />
               <Row label="Sales Tax"    value={row.sales_tax} />
               <Row label="GPI"          value={row.gpi} />
+              <Row label="Gas (gal)"    value={row.gas_gallons} />
+              <Row label="Gas ($)"      value={row.gas_dollars} />
+              <Row label="Pay In"       value={row.paid_in} />
             </div>
 
             {/* Grand total */}
@@ -129,8 +142,9 @@ function ExpandedRow({ row }: { row: Sale }) {
             <Row label="Pull Tab"     value={row.pull_tab} />
             <Row label="Coupon"       value={row.coupon} />
             <Row label="Food Stamp"   value={row.food_stamp} />
-            <Row label="Loyalty"      value={row.loyalty} />
-            <Row label="Vendor Payout" value={row.vendor_payout} />
+            <Row label="Loyalty"        value={row.loyalty} />
+            <Row label="Vendor Payout"  value={row.vendor_payout} />
+            <Row label="Cashed Checks"  value={row.cashed_checks} />
 
             {/* Right total */}
             <div className="flex justify-between border-t pt-1 mt-1 font-bold text-gray-900 text-base">
