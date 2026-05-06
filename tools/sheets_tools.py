@@ -662,6 +662,170 @@ def find_column_in_section(
 
 
 # ---------------------------------------------------------------------------
+# Unified log_entry — read the actual sheet, find the right column, write
+# ---------------------------------------------------------------------------
+
+# Section layout — row positions are shared between Moraine and Hamilton sheets.
+# Same template for any new store using a similar monthly tab format.
+SECTION_CONFIG: dict[str, dict] = {
+    "invoice": {
+        "label":          "INVENTORY (COGS)",
+        "header_row":     _COGS_HEADER_ROW,      # 38
+        "data_start_row": _COGS_DATA_START,      # 39
+        "col_start":      1,
+        "col_end":        None,
+    },
+    "expense": {
+        "label":          "EXPENSES",
+        "header_row":     _EXP_HEADER_ROW,       # 73
+        "data_start_row": _EXP_DATA_START,       # 74
+        "col_start":      1,
+        "col_end":        _PAYROLL_COL_START - 1,  # 19
+    },
+    "payroll": {
+        "label":          "PAYROLL",
+        "header_row":     _EXP_HEADER_ROW,       # 73 (shared with EXPENSES)
+        "data_start_row": _EXP_DATA_START,       # 74
+        "col_start":      _PAYROLL_COL_START,    # 20
+        "col_end":        None,
+    },
+    "rebate": {
+        "label":          "REBATES",
+        "header_row":     _REV_HEADER_ROW,       # 108
+        "data_start_row": _REV_DATA_START,       # 109
+        "col_start":      1,
+        "col_end":        _PROFIT_COL_START - 1,   # 17
+    },
+    "revenue": {
+        "label":          "PROFIT TOOK HOME",
+        "header_row":     _REV_HEADER_ROW,       # 108 (shared with REBATES)
+        "data_start_row": _REV_DATA_START,       # 109
+        "col_start":      _PROFIT_COL_START,     # 18
+        "col_end":        None,
+    },
+}
+
+
+def _section_columns(sheet, section_key: str) -> list[tuple[int, str]]:
+    """Read the section's header row from the actual sheet, return [(col_idx, label), ...]."""
+    cfg = SECTION_CONFIG[section_key]
+    header = sheet.row_values(cfg["header_row"])
+    end = cfg["col_end"] or len(header)
+    out: list[tuple[int, str]] = []
+    for i in range(cfg["col_start"] - 1, min(end, len(header))):
+        label = header[i].strip()
+        if not label or label.upper() in ("DATE", "TOTAL"):
+            continue
+        out.append((i + 1, label))
+    return out
+
+
+def _find_in_section(sheet, section_key: str, item: str) -> tuple[int, str] | None:
+    """Fuzzy-find a column in a single section. Returns (col_idx, label) or None."""
+    candidates = _section_columns(sheet, section_key)
+    if not candidates:
+        return None
+
+    target = _normalize_label(item)
+    if not target:
+        return None
+
+    # 1. Exact normalized match
+    for idx, label in candidates:
+        if _normalize_label(label) == target:
+            return (idx, label)
+    # 2. Substring either direction
+    for idx, label in candidates:
+        norm = _normalize_label(label)
+        if target in norm or norm in target:
+            return (idx, label)
+    # 3. Difflib fuzzy
+    import difflib
+    norm_to_pair = {_normalize_label(label): (idx, label) for idx, label in candidates}
+    close = difflib.get_close_matches(target, list(norm_to_pair.keys()), n=1, cutoff=0.7)
+    if close:
+        return norm_to_pair[close[0]]
+    return None
+
+
+def log_entry(
+    item: str,
+    amount: float,
+    entry_date: date,
+    section: str | None = None,
+) -> dict:
+    """Log a monetary entry to the right cell in the monthly tab.
+
+    item: vendor/employee/category name as the user said it.
+    section: optional hint — one of {invoice, expense, payroll, rebate, revenue}.
+             If omitted, search every section.
+
+    Returns a dict the caller can inspect:
+      success:    {"ok": True, "section": "invoice", "label": "PEPSI", "cell": "B41"}
+      ambiguous:  {"ok": False, "reason": "ambiguous", "matches": [{section, label}, ...]}
+      not_found:  {"ok": False, "reason": "not_found", "available": {section: [labels]}}
+    """
+    client = _get_client()
+    spreadsheet = client.open_by_key(get_store_sheet_id())
+    sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+
+    if section and section not in SECTION_CONFIG:
+        return {
+            "ok": False,
+            "reason": "bad_section",
+            "valid_sections": list(SECTION_CONFIG.keys()),
+        }
+
+    sections_to_search = [section] if section else list(SECTION_CONFIG.keys())
+
+    matches: list[dict] = []
+    for sec in sections_to_search:
+        m = _find_in_section(sheet, sec, item)
+        if m:
+            col_idx, label = m
+            matches.append({"section": sec, "col_idx": col_idx, "label": label})
+
+    if not matches:
+        available = {sec: [lbl for _, lbl in _section_columns(sheet, sec)] for sec in sections_to_search}
+        return {"ok": False, "reason": "not_found", "available": available, "search": item}
+
+    if len(matches) > 1:
+        return {
+            "ok": False,
+            "reason": "ambiguous",
+            "matches": [{"section": m["section"], "label": m["label"]} for m in matches],
+        }
+
+    # Single match — write
+    chosen = matches[0]
+    cfg = SECTION_CONFIG[chosen["section"]]
+    target_row = cfg["data_start_row"] + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, chosen["col_idx"])
+    date_cell = gspread.utils.rowcol_to_a1(target_row, 1)
+
+    # Write the amount, and also stamp the date in col 1 if that cell is empty.
+    sheet.update(cell, [[amount]])
+    try:
+        date_existing = sheet.get(date_cell)
+        date_is_empty = not (date_existing and date_existing[0] and date_existing[0][0].strip())
+    except Exception:
+        date_is_empty = True
+    if date_is_empty:
+        date_str = entry_date.strftime("%-m/%-d")  # "5/3"
+        sheet.update(date_cell, [[date_str]], value_input_option="USER_ENTERED")
+
+    return {
+        "ok": True,
+        "section": chosen["section"],
+        "section_label": cfg["label"],
+        "label": chosen["label"],
+        "cell": cell,
+        "amount": amount,
+        "date": str(entry_date),
+    }
+
+
+# ---------------------------------------------------------------------------
 # COGS / Invoice logging
 # ---------------------------------------------------------------------------
 

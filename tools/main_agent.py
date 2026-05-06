@@ -377,6 +377,165 @@ def query_bank_transactions(days: int = 7, status: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 @tool
+def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -> str:
+    """Log a monetary entry (vendor invoice, expense, payroll, rebate, or revenue)
+    to the Google Sheet AND the database.
+
+    The tool reads the actual sheet's column headers and finds where the entry
+    belongs. It does NOT pre-validate names — pass whatever the user said,
+    verbatim. The sheet is the source of truth.
+
+    item: the user's word for what's being logged. Examples: "pepsi", "garry",
+          "store rent", "altria", "electricity". Pass it RAW. Do NOT translate,
+          expand, or guess what column it maps to. The tool fuzzy-matches.
+    amount: dollar amount (positive number).
+    date_str: optional. "april 2", "4/2", "5/3/2026", "2026-04-02", or "april".
+              Defaults to today.
+    section: optional hint, used ONLY when the same name could match multiple
+             sections. One of: invoice, expense, payroll, rebate, revenue.
+             Leave empty if you're not sure — the tool will tell you if there's
+             ambiguity.
+
+    Tool returns one of:
+      - Success: "Logged $X to LABEL (SECTION) on DATE"
+      - Not found: "No column matches 'X'. Available in {section}: ... — ask the
+                    user which to use, or whether to skip."
+      - Ambiguous: "X exists in multiple sections (SEC1, SEC2) — ask which."
+
+    When the tool returns "not found" or "ambiguous", DO NOT retry with a
+    different name unless the user clarifies. ASK the user.
+    """
+    from db.models import Expense, Invoice, Rebate, Revenue
+
+    entry_date = _parse_date(date_str)
+    sec = (section or "").strip().lower() or None
+    if sec and sec not in ("invoice", "expense", "payroll", "rebate", "revenue"):
+        return f"Invalid section '{section}'. Use one of: invoice, expense, payroll, rebate, revenue."
+
+    try:
+        result = sheets_tools.log_entry(item=item, amount=float(amount), entry_date=entry_date, section=sec)
+    except Exception as e:
+        return f"Sheet update failed: {e}"
+
+    if not result.get("ok"):
+        reason = result.get("reason")
+        if reason == "ambiguous":
+            opts = ", ".join(f"{m['section']}={m['label']}" for m in result["matches"])
+            return f"'{item}' matches columns in multiple sections: {opts}. Ask the user which section to use."
+        if reason == "not_found":
+            avail_lines = []
+            for sec_key, labels in result["available"].items():
+                preview = ", ".join(labels[:30])
+                avail_lines.append(f"  {sec_key}: {preview}")
+            return (
+                f"No column matches '{item}'.\nAvailable columns:\n"
+                + "\n".join(avail_lines)
+                + "\nAsk the user which column to log under, or if they want to add a new column to the sheet."
+            )
+        return f"Sheet write failed: {reason or 'unknown error'}"
+
+    # Sheet write succeeded — mirror to canonical DB based on detected section.
+    matched_label = result["label"]
+    detected_section = result["section"]
+    cell = result["cell"]
+
+    try:
+        with get_sync_session() as session:
+            store_id = get_active_store()
+            if detected_section == "invoice":
+                existing = session.execute(
+                    select(Invoice).where(and_(
+                        Invoice.store_id == store_id,
+                        Invoice.invoice_date == entry_date,
+                        Invoice.vendor == matched_label,
+                    ))
+                ).scalar_one_or_none()
+                if existing:
+                    existing.amount = Decimal(str(amount))
+                    existing.last_updated_by = "bot"
+                else:
+                    session.add(Invoice(
+                        store_id=store_id, invoice_date=entry_date,
+                        vendor=matched_label, amount=Decimal(str(amount)),
+                        last_updated_by="bot",
+                    ))
+            elif detected_section == "expense":
+                existing = session.execute(
+                    select(Expense).where(and_(
+                        Expense.store_id == store_id,
+                        Expense.expense_date == entry_date,
+                        Expense.category == matched_label,
+                    ))
+                ).scalar_one_or_none()
+                if existing:
+                    existing.amount = Decimal(str(amount))
+                    existing.last_updated_by = "bot"
+                else:
+                    session.add(Expense(
+                        store_id=store_id, expense_date=entry_date,
+                        category=matched_label, amount=Decimal(str(amount)),
+                        last_updated_by="bot",
+                    ))
+            elif detected_section == "payroll":
+                cat = f"PAYROLL - {matched_label}"
+                existing = session.execute(
+                    select(Expense).where(and_(
+                        Expense.store_id == store_id,
+                        Expense.expense_date == entry_date,
+                        Expense.category == cat,
+                    ))
+                ).scalar_one_or_none()
+                if existing:
+                    existing.amount = Decimal(str(amount))
+                    existing.last_updated_by = "bot"
+                else:
+                    session.add(Expense(
+                        store_id=store_id, expense_date=entry_date,
+                        category=cat, amount=Decimal(str(amount)),
+                        notes=matched_label, last_updated_by="bot",
+                    ))
+            elif detected_section == "rebate":
+                existing = session.execute(
+                    select(Rebate).where(and_(
+                        Rebate.store_id == store_id,
+                        Rebate.rebate_date == entry_date,
+                        Rebate.vendor == matched_label,
+                    ))
+                ).scalar_one_or_none()
+                if existing:
+                    existing.amount = Decimal(str(amount))
+                    existing.last_updated_by = "bot"
+                else:
+                    session.add(Rebate(
+                        store_id=store_id, rebate_date=entry_date,
+                        vendor=matched_label, amount=Decimal(str(amount)),
+                        last_updated_by="bot",
+                    ))
+            elif detected_section == "revenue":
+                existing = session.execute(
+                    select(Revenue).where(and_(
+                        Revenue.store_id == store_id,
+                        Revenue.revenue_date == entry_date,
+                        Revenue.category == matched_label,
+                    ))
+                ).scalar_one_or_none()
+                if existing:
+                    existing.amount = Decimal(str(amount))
+                    existing.last_updated_by = "bot"
+                else:
+                    session.add(Revenue(
+                        store_id=store_id, revenue_date=entry_date,
+                        category=matched_label, amount=Decimal(str(amount)),
+                        last_updated_by="bot",
+                    ))
+    except Exception as e:
+        log.exception("DB mirror failed for log_entry")
+        return f"Logged ${amount:.2f} → {matched_label} ({detected_section.upper()}) on {entry_date} (cell {cell}). DB mirror failed: {e}"
+
+    return f"Logged ${amount:.2f} → {matched_label} ({detected_section.upper()}) on {entry_date} (cell {cell})"
+
+
+@tool
 def log_expense(category: str, amount: float, date_str: str = "") -> str:
     """
     Log or update an expense to the database and Google Sheets.
@@ -720,12 +879,8 @@ _ALL_TOOLS = [
     query_vendors,
     query_ordered_items,
     query_bank_transactions,
-    # Write
-    log_expense,
-    log_invoice,
-    log_payroll,
-    log_rebate,
-    log_revenue,
+    # Write — single unified entry tool replaces log_invoice/expense/payroll/rebate/revenue
+    log_entry,
     log_daily_sales,
     sync_sheets_now,
 ]
@@ -813,24 +968,29 @@ COMMUNICATION RULES:
 
 DATA & LOGGING RULES:
 - Use tools to answer data questions (sales, expenses, invoices, prices, vendors, revenue).
-- For write operations (log expense, invoice, rebate, revenue): call the log_* tool directly. Do not ask for confirmation unless something is clearly ambiguous.
+- For ANY "log X amount" request (vendor invoice, expense, payroll, rebate, revenue): use the log_entry tool. There is ONE write tool — log_entry — for all five categories. The tool reads the actual sheet structure and finds the right column. Do not pre-validate names or refuse names you "don't know". Just call the tool with the user's words verbatim.
 - For prices say: "Marlboro Red Short costs $9.20 per pack from McLane."
 - For sales say: "You made $2,243 total on Tuesday."
 - The Google Sheet is connected and syncs both ways every night.
 - If asked to sync now, use sync_sheets_now tool.
 
-PARSING USER INPUTS:
-- When a user says "vendor amount date" (e.g. "bonbright 240.98 april2", "mclane 2100 3/14"), call log_invoice with those values. Extract vendor, amount, and date.
-- When a user says "log vendor amount" or "vendor invoice amount", call log_invoice.
-- Vendor names may be misspelled or from voice transcription. The tool will fuzzy-match. Just pass what the user said.
-- Dates can be casual: "yesterday", "march 5", "3/5", "april2", "last tuesday". Pass the date string to the tool.
-- If the user gives vendor + amount but no date, leave date_str empty (defaults to today).
-- When a user asks "what were my sales yesterday" or "what was my sale yesterday", use query_sales. This is NOT a daily report trigger.
-- When a user says "electricity 340 march" or "rent 1200", call log_expense.
-- When a user says "altria rebate 500", call log_rebate.
-- When a user asks "total inventory this week" or "how much was pepsi delivery last month", use query_ordered_items. This queries vendor invoice totals over a period.
-- When a user asks about bank activity, cleared payments, unmatched transactions, or pending invoices in the bank, use query_bank_transactions.
-- When a user asks about price or cost of an item (e.g. "price of marlboro", "what does mountain dew cost"), use query_prices.
+PARSING USER INPUTS — log_entry:
+- "log pepsi 300 may 3"           → log_entry(item="pepsi", amount=300, date_str="may 3")
+- "garry 500 payroll"             → log_entry(item="garry", amount=500, section="payroll")
+- "rent 1200"                     → log_entry(item="rent", amount=1200)
+- "altria rebate 500"             → log_entry(item="altria", amount=500, section="rebate")
+- "log mclane 2100 3/14"          → log_entry(item="mclane", amount=2100, date_str="3/14")
+- "bonbright 240.98 april2"       → log_entry(item="bonbright", amount=240.98, date_str="april2")
+- Pass `section` ONLY when the user's words explicitly suggest a category (mentioned "payroll", "rebate", "expense") OR you have a strong hint. When unsure, omit `section` and let the tool search every section.
+- If the tool returns "not found" with available columns, do NOT retry with a different name. Show the user the available columns and ask which to use, or whether to add a new one to the sheet.
+- If the tool returns "ambiguous", show the user the matching sections and ask which one.
+
+OTHER TOOLS:
+- Dates can be casual: "yesterday", "march 5", "3/5", "april2", "last tuesday". Pass the date string straight through.
+- "what were my sales yesterday" / "what was my sale yesterday" → query_sales. Not a daily report trigger.
+- "total inventory this week" / "how much was pepsi delivery last month" → query_ordered_items.
+- Bank activity, cleared payments, unmatched transactions → query_bank_transactions.
+- Price/cost of an item → query_prices.
 
 BUSINESS ADVISOR ROLE:
 - When you show the owner data, also give a short insight if something stands out. For example: "Your cigarette sales dropped 12% this week — that sometimes happens when a competitor runs a promotion nearby."
