@@ -706,6 +706,16 @@ def _discover_sections_uncached(sheet) -> list[dict]:
                 last_non_empty = max((c + 1 for c, v in enumerate(row) if v.strip()), default=date_col)
                 col_end = last_non_empty
             title = _find_title_above(all_values, row_idx, date_col, col_end)
+            if not title:
+                # No distinct title above the section's column range — fall back
+                # to the first non-DATE column label (e.g. "GAS INVOICE $" for a
+                # subsection appended at the end of an existing section).
+                for c in range(date_col, col_end + 1):
+                    if c <= len(row):
+                        candidate = row[c - 1].strip()
+                        if candidate and candidate.upper() not in ("DATE", "TOTAL"):
+                            title = candidate
+                            break
             sections.append({
                 "title": title or f"section_r{row_idx}_c{date_col}",
                 "header_row": row_idx,
@@ -717,33 +727,17 @@ def _discover_sections_uncached(sheet) -> list[dict]:
 
 
 def _find_title_above(all_values: list, header_row_idx: int, col_start: int, col_end: int) -> str | None:
-    """Find the section title by looking in rows above the header row.
-
-    First searches inside the section's own column range. If nothing found
-    (i.e., this is a sub-section the owner appended without its own title),
-    falls back to walking left across the row above to find the parent
-    section's title — same one that anchors the leftmost section in the row.
+    """Find a section title by searching rows above the header, ONLY inside
+    the section's own column range. If nothing distinct is found, the caller
+    should fall back to the section's first column label — using a parent's
+    title from outside the range causes title collisions between sub-sections.
     """
-    # 1. Search the section's own column range
     for offset in (1, 2, 3):
         title_row_idx = header_row_idx - offset
         if title_row_idx < 1:
             break
         title_row = all_values[title_row_idx - 1]
         for c in range(col_start - 1, min(col_end, len(title_row))):
-            label = title_row[c].strip()
-            if not label or label.upper() in ("DATE", "TOTAL"):
-                continue
-            if len(label) > 1:
-                return label
-
-    # 2. Fallback: walk left across rows above to find a parent section title
-    for offset in (1, 2, 3):
-        title_row_idx = header_row_idx - offset
-        if title_row_idx < 1:
-            break
-        title_row = all_values[title_row_idx - 1]
-        for c in range(min(col_start - 2, len(title_row) - 1), -1, -1):
             label = title_row[c].strip()
             if not label or label.upper() in ("DATE", "TOTAL"):
                 continue
@@ -781,19 +775,39 @@ def _find_in_section_dynamic(sheet, sec: dict, item: str) -> tuple[int, str] | N
     candidates = _section_data_columns(sheet, sec)
     if not candidates:
         return None
-    target = _normalize_label(item)
-    if not target:
+    target_norm = _normalize_label(item)
+    if not target_norm:
         return None
+    target_lower = item.lower().strip()
+
+    # 1. Exact normalized match
     for idx, label in candidates:
-        if _normalize_label(label) == target:
+        if _normalize_label(label) == target_norm:
             return (idx, label)
+
+    # 2a. User typed less than the column name — target is a substring of label
+    #     "rent" → "STORE RENT", "pepsi" → "PEPSI CO"
     for idx, label in candidates:
-        norm = _normalize_label(label)
-        if target in norm or norm in target:
+        if target_norm in _normalize_label(label):
             return (idx, label)
+
+    # 2b. User typed more than the column name — label appears as a WORD in target
+    #     "altria rebate" → "ALTRIA". Word boundary required to prevent
+    #     "ICE" from matching "gas in[voice]" (substring without word boundary).
+    import re
+    target_for_words = re.sub(r"[^a-z0-9\s]", " ", target_lower)
+    for idx, label in candidates:
+        label_norm = _normalize_label(label)
+        if not label_norm:
+            continue
+        pattern = r"\b" + re.escape(label_norm) + r"\b"
+        if re.search(pattern, target_for_words):
+            return (idx, label)
+
+    # 3. Difflib fuzzy fallback (handles "bonbright" ↔ "BONERIGHT", etc.)
     import difflib
     norm_to_pair = {_normalize_label(label): (idx, label) for idx, label in candidates}
-    close = difflib.get_close_matches(target, list(norm_to_pair.keys()), n=1, cutoff=0.7)
+    close = difflib.get_close_matches(target_norm, list(norm_to_pair.keys()), n=1, cutoff=0.7)
     if close:
         return norm_to_pair[close[0]]
     return None
