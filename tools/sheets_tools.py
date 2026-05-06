@@ -801,7 +801,9 @@ def log_entry(
     cfg = SECTION_CONFIG[chosen["section"]]
     target_row = cfg["data_start_row"] + entry_date.day - 1
     cell = gspread.utils.rowcol_to_a1(target_row, chosen["col_idx"])
-    date_cell = gspread.utils.rowcol_to_a1(target_row, 1)
+    # Each section has its own DATE column at col_start (e.g. PAYROLL date = col 20,
+    # PROFIT TOOK HOME date = col 18). Don't write all dates to column A.
+    date_cell = gspread.utils.rowcol_to_a1(target_row, cfg["col_start"])
 
     # Write the amount, and also stamp the date in col 1 if that cell is empty.
     sheet.update(cell, [[amount]])
