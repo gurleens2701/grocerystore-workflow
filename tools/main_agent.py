@@ -376,31 +376,57 @@ def query_bank_transactions(days: int = 7, status: str = "") -> str:
 # WRITE TOOLS
 # ---------------------------------------------------------------------------
 
-@tool
-def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -> str:
-    """Log a monetary entry (vendor invoice, expense, payroll, rebate, or revenue)
-    to the Google Sheet AND the database.
+def _section_to_db_kind(section_title: str) -> str | None:
+    """Map a free-form sheet section title to a canonical DB kind.
 
-    The tool reads the actual sheet's column headers and finds where the entry
-    belongs. It does NOT pre-validate names — pass whatever the user said,
-    verbatim. The sheet is the source of truth.
+    Sheet section titles like "INVENTORY (COGS", "EXPENSES", "PAYROLL",
+    "REBATES", "PROFIT TOOK HOME" map to their DB tables. Unknown titles
+    return None — the sheet write still happens, the DB mirror is skipped.
+    """
+    t = (section_title or "").upper()
+    if "PAYROLL" in t:
+        return "payroll"
+    if "INVENTORY" in t or "COGS" in t:
+        return "invoice"
+    if "EXPENSE" in t:
+        return "expense"
+    if "REBATE" in t:
+        return "rebate"
+    if "PROFIT" in t or "REVENUE" in t:
+        return "revenue"
+    return None
+
+
+@tool
+def log_entry(item: str, amount: float, date_str: str = "", section: str = "", check_number: str = "") -> str:
+    """Log a monetary entry (vendor invoice, expense, payroll, rebate, revenue,
+    gas invoice, etc.) to the Google Sheet AND the database.
+
+    The tool DISCOVERS sections from the actual Google Sheet — every "DATE"
+    column header marks a section. There is NO hardcoded list of sections,
+    vendors, employees, or categories. Whatever columns the owner has in their
+    sheet ARE the available targets.
 
     item: the user's word for what's being logged. Examples: "pepsi", "garry",
-          "store rent", "altria", "electricity". Pass it RAW. Do NOT translate,
-          expand, or guess what column it maps to. The tool fuzzy-matches.
+          "store rent", "altria", "electricity", "gas invoice". Pass it RAW —
+          do not translate, expand, or guess what column it maps to.
     amount: dollar amount (positive number).
-    date_str: optional. "april 2", "4/2", "5/3/2026", "2026-04-02", or "april".
+    date_str: optional. "april 2", "4/2", "5/3/2026", "2026-04-02", "april".
               Defaults to today.
-    section: optional hint, used ONLY when the same name could match multiple
-             sections. One of: invoice, expense, payroll, rebate, revenue.
-             Leave empty if you're not sure — the tool will tell you if there's
-             ambiguity.
+    section: optional hint to disambiguate when the same word could match
+             multiple sections. Free-form — anything close to the section's
+             title in the sheet works (e.g. "payroll", "rebate", "gas",
+             "inventory", "profit"). Leave empty if you're not sure.
+    check_number: optional. When the entry was paid by a check, pass the check
+             number — the tool will write it to the section's CH#/CHECK column
+             on the same row. Use this for "log gas invoice $5000 check 1234"
+             style requests.
 
     Tool returns one of:
-      - Success: "Logged $X to LABEL (SECTION) on DATE"
-      - Not found: "No column matches 'X'. Available in {section}: ... — ask the
-                    user which to use, or whether to skip."
-      - Ambiguous: "X exists in multiple sections (SEC1, SEC2) — ask which."
+      - Success: "Logged $X to LABEL (SECTION) on DATE [check #N]"
+      - Not found: lists actual sheet columns by section — ask the user which
+        to use or whether to add a new column.
+      - Ambiguous: lists matching sections — ask which.
 
     When the tool returns "not found" or "ambiguous", DO NOT retry with a
     different name unless the user clarifies. ASK the user.
@@ -408,12 +434,17 @@ def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -
     from db.models import Expense, Invoice, Rebate, Revenue
 
     entry_date = _parse_date(date_str)
-    sec = (section or "").strip().lower() or None
-    if sec and sec not in ("invoice", "expense", "payroll", "rebate", "revenue"):
-        return f"Invalid section '{section}'. Use one of: invoice, expense, payroll, rebate, revenue."
+    sec_hint = (section or "").strip() or None
+    chk = (check_number or "").strip() or None
 
     try:
-        result = sheets_tools.log_entry(item=item, amount=float(amount), entry_date=entry_date, section=sec)
+        result = sheets_tools.log_entry(
+            item=item,
+            amount=float(amount),
+            entry_date=entry_date,
+            section=sec_hint,
+            check_number=chk,
+        )
     except Exception as e:
         return f"Sheet update failed: {e}"
 
@@ -424,9 +455,9 @@ def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -
             return f"'{item}' matches columns in multiple sections: {opts}. Ask the user which section to use."
         if reason == "not_found":
             avail_lines = []
-            for sec_key, labels in result["available"].items():
+            for sec_title, labels in result.get("available", {}).items():
                 preview = ", ".join(labels[:30])
-                avail_lines.append(f"  {sec_key}: {preview}")
+                avail_lines.append(f"  {sec_title}: {preview}")
             return (
                 f"No column matches '{item}'.\nAvailable columns:\n"
                 + "\n".join(avail_lines)
@@ -434,15 +465,20 @@ def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -
             )
         return f"Sheet write failed: {reason or 'unknown error'}"
 
-    # Sheet write succeeded — mirror to canonical DB based on detected section.
     matched_label = result["label"]
-    detected_section = result["section"]
+    section_title = result["section"]
     cell = result["cell"]
+    db_kind = _section_to_db_kind(section_title)
+
+    if db_kind is None:
+        # Unknown section type — sheet write succeeded, no DB mirror.
+        chk_msg = f" check #{chk}" if chk else ""
+        return f"Logged ${amount:.2f} → {matched_label} ({section_title}) on {entry_date} (cell {cell}){chk_msg}"
 
     try:
         with get_sync_session() as session:
             store_id = get_active_store()
-            if detected_section == "invoice":
+            if db_kind == "invoice":
                 existing = session.execute(
                     select(Invoice).where(and_(
                         Invoice.store_id == store_id,
@@ -459,7 +495,7 @@ def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -
                         vendor=matched_label, amount=Decimal(str(amount)),
                         last_updated_by="bot",
                     ))
-            elif detected_section == "expense":
+            elif db_kind == "expense":
                 existing = session.execute(
                     select(Expense).where(and_(
                         Expense.store_id == store_id,
@@ -476,7 +512,7 @@ def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -
                         category=matched_label, amount=Decimal(str(amount)),
                         last_updated_by="bot",
                     ))
-            elif detected_section == "payroll":
+            elif db_kind == "payroll":
                 cat = f"PAYROLL - {matched_label}"
                 existing = session.execute(
                     select(Expense).where(and_(
@@ -494,7 +530,7 @@ def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -
                         category=cat, amount=Decimal(str(amount)),
                         notes=matched_label, last_updated_by="bot",
                     ))
-            elif detected_section == "rebate":
+            elif db_kind == "rebate":
                 existing = session.execute(
                     select(Rebate).where(and_(
                         Rebate.store_id == store_id,
@@ -511,7 +547,7 @@ def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -
                         vendor=matched_label, amount=Decimal(str(amount)),
                         last_updated_by="bot",
                     ))
-            elif detected_section == "revenue":
+            elif db_kind == "revenue":
                 existing = session.execute(
                     select(Revenue).where(and_(
                         Revenue.store_id == store_id,
@@ -530,9 +566,10 @@ def log_entry(item: str, amount: float, date_str: str = "", section: str = "") -
                     ))
     except Exception as e:
         log.exception("DB mirror failed for log_entry")
-        return f"Logged ${amount:.2f} → {matched_label} ({detected_section.upper()}) on {entry_date} (cell {cell}). DB mirror failed: {e}"
+        return f"Logged ${amount:.2f} → {matched_label} ({section_title}) on {entry_date} (cell {cell}). DB mirror failed: {e}"
 
-    return f"Logged ${amount:.2f} → {matched_label} ({detected_section.upper()}) on {entry_date} (cell {cell})"
+    chk_msg = f" check #{chk}" if chk else ""
+    return f"Logged ${amount:.2f} → {matched_label} ({section_title}) on {entry_date} (cell {cell}){chk_msg}"
 
 
 @tool
@@ -975,14 +1012,16 @@ DATA & LOGGING RULES:
 - If asked to sync now, use sync_sheets_now tool.
 
 PARSING USER INPUTS — log_entry:
-- "log pepsi 300 may 3"           → log_entry(item="pepsi", amount=300, date_str="may 3")
-- "garry 500 payroll"             → log_entry(item="garry", amount=500, section="payroll")
-- "rent 1200"                     → log_entry(item="rent", amount=1200)
-- "altria rebate 500"             → log_entry(item="altria", amount=500, section="rebate")
-- "log mclane 2100 3/14"          → log_entry(item="mclane", amount=2100, date_str="3/14")
-- "bonbright 240.98 april2"       → log_entry(item="bonbright", amount=240.98, date_str="april2")
-- Pass `section` ONLY when the user's words explicitly suggest a category (mentioned "payroll", "rebate", "expense") OR you have a strong hint. When unsure, omit `section` and let the tool search every section.
-- If the tool returns "not found" with available columns, do NOT retry with a different name. Show the user the available columns and ask which to use, or whether to add a new one to the sheet.
+- "log pepsi 300 may 3"               → log_entry(item="pepsi", amount=300, date_str="may 3")
+- "garry 500 payroll"                 → log_entry(item="garry", amount=500, section="payroll")
+- "rent 1200"                         → log_entry(item="rent", amount=1200)
+- "altria rebate 500"                 → log_entry(item="altria", amount=500, section="rebate")
+- "log mclane 2100 3/14"              → log_entry(item="mclane", amount=2100, date_str="3/14")
+- "gas invoice 5000 check 1234 5/3"   → log_entry(item="gas invoice", amount=5000, date_str="5/3", check_number="1234")
+- "bonbright 240.98 april2"           → log_entry(item="bonbright", amount=240.98, date_str="april2")
+- Pass `check_number` whenever the user mentions a check number, ch#, or paid by check. The tool writes it to the section's CHECK# column on the same row.
+- Pass `section` as a free-form hint (e.g. "payroll", "rebate", "gas") only when the user's words explicitly suggest a category. When unsure, omit `section` and let the tool search the whole sheet.
+- If the tool returns "not found" with available columns, do NOT retry with a different name. Show the user the available columns and ask which to use, or whether to add a new column to the sheet.
 - If the tool returns "ambiguous", show the user the matching sections and ask which one.
 
 OTHER TOOLS:

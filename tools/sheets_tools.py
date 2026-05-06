@@ -662,57 +662,113 @@ def find_column_in_section(
 
 
 # ---------------------------------------------------------------------------
-# Unified log_entry — read the actual sheet, find the right column, write
+# Unified log_entry — discover sections from the sheet, fuzzy-match, write
 # ---------------------------------------------------------------------------
+#
+# A "section" is detected by scanning for any column labeled "DATE" in the sheet.
+# Each DATE column starts a new section. The section spans from that DATE column
+# up to the next DATE column (or end of row). The section title is found by
+# searching above the header row for a non-empty caps label aligned with or to
+# the left of the section's start column.
+#
+# Why dynamic: owners add sections all the time (e.g. "GAS INVOICE $ / INVOICE
+# CH#" appended to COGS). Hardcoding a config table would force a code change
+# every time. Reading the sheet itself means: add a column → next call picks it up.
 
-# Section layout — row positions are shared between Moraine and Hamilton sheets.
-# Same template for any new store using a similar monthly tab format.
-SECTION_CONFIG: dict[str, dict] = {
-    "invoice": {
-        "label":          "INVENTORY (COGS)",
-        "header_row":     _COGS_HEADER_ROW,      # 38
-        "data_start_row": _COGS_DATA_START,      # 39
-        "col_start":      1,
-        "col_end":        None,
-    },
-    "expense": {
-        "label":          "EXPENSES",
-        "header_row":     _EXP_HEADER_ROW,       # 73
-        "data_start_row": _EXP_DATA_START,       # 74
-        "col_start":      1,
-        "col_end":        _PAYROLL_COL_START - 1,  # 19
-    },
-    "payroll": {
-        "label":          "PAYROLL",
-        "header_row":     _EXP_HEADER_ROW,       # 73 (shared with EXPENSES)
-        "data_start_row": _EXP_DATA_START,       # 74
-        "col_start":      _PAYROLL_COL_START,    # 20
-        "col_end":        None,
-    },
-    "rebate": {
-        "label":          "REBATES",
-        "header_row":     _REV_HEADER_ROW,       # 108
-        "data_start_row": _REV_DATA_START,       # 109
-        "col_start":      1,
-        "col_end":        _PROFIT_COL_START - 1,   # 17
-    },
-    "revenue": {
-        "label":          "PROFIT TOOK HOME",
-        "header_row":     _REV_HEADER_ROW,       # 108 (shared with REBATES)
-        "data_start_row": _REV_DATA_START,       # 109
-        "col_start":      _PROFIT_COL_START,     # 18
-        "col_end":        None,
-    },
-}
+import time as _time
+
+# Per-(sheet_id, tab_name) section cache. 5-min TTL.
+_SECTION_CACHE: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+_SECTION_TTL = 300
 
 
-def _section_columns(sheet, section_key: str) -> list[tuple[int, str]]:
-    """Read the section's header row, return [(col_idx, label), ...] excluding DATE/TOTAL."""
-    cfg = SECTION_CONFIG[section_key]
-    header = sheet.row_values(cfg["header_row"])
-    end = cfg["col_end"] or len(header)
+def _discover_sections_uncached(sheet) -> list[dict]:
+    """Scan the sheet, return a list of detected sections.
+
+    Each entry: {
+      "title": str,            # human-readable label for the section
+      "header_row": int,       # 1-based row containing column labels
+      "data_start_row": int,   # = header_row + 1
+      "col_start": int,        # 1-based column where the section's DATE col sits
+      "col_end": int,          # last column index belonging to this section
+    }
+    """
+    all_values = sheet.get_all_values()
+    sections: list[dict] = []
+    for row_idx, row in enumerate(all_values, start=1):
+        date_cols = [c + 1 for c, v in enumerate(row) if v.strip().upper() == "DATE"]
+        if not date_cols:
+            continue
+        for i, date_col in enumerate(date_cols):
+            if i + 1 < len(date_cols):
+                col_end = date_cols[i + 1] - 1
+            else:
+                last_non_empty = max((c + 1 for c, v in enumerate(row) if v.strip()), default=date_col)
+                col_end = last_non_empty
+            title = _find_title_above(all_values, row_idx, date_col, col_end)
+            sections.append({
+                "title": title or f"section_r{row_idx}_c{date_col}",
+                "header_row": row_idx,
+                "data_start_row": row_idx + 1,
+                "col_start": date_col,
+                "col_end": col_end,
+            })
+    return sections
+
+
+def _find_title_above(all_values: list, header_row_idx: int, col_start: int, col_end: int) -> str | None:
+    """Find the section title by looking in rows above the header row.
+
+    First searches inside the section's own column range. If nothing found
+    (i.e., this is a sub-section the owner appended without its own title),
+    falls back to walking left across the row above to find the parent
+    section's title — same one that anchors the leftmost section in the row.
+    """
+    # 1. Search the section's own column range
+    for offset in (1, 2, 3):
+        title_row_idx = header_row_idx - offset
+        if title_row_idx < 1:
+            break
+        title_row = all_values[title_row_idx - 1]
+        for c in range(col_start - 1, min(col_end, len(title_row))):
+            label = title_row[c].strip()
+            if not label or label.upper() in ("DATE", "TOTAL"):
+                continue
+            if len(label) > 1:
+                return label
+
+    # 2. Fallback: walk left across rows above to find a parent section title
+    for offset in (1, 2, 3):
+        title_row_idx = header_row_idx - offset
+        if title_row_idx < 1:
+            break
+        title_row = all_values[title_row_idx - 1]
+        for c in range(min(col_start - 2, len(title_row) - 1), -1, -1):
+            label = title_row[c].strip()
+            if not label or label.upper() in ("DATE", "TOTAL"):
+                continue
+            if len(label) > 1:
+                return label
+    return None
+
+
+def _discover_sections(sheet) -> list[dict]:
+    """5-min cached wrapper around _discover_sections_uncached."""
+    key = (sheet.spreadsheet.id, sheet.title)
+    now = _time.time()
+    cached = _SECTION_CACHE.get(key)
+    if cached and now - cached[0] < _SECTION_TTL:
+        return cached[1]
+    result = _discover_sections_uncached(sheet)
+    _SECTION_CACHE[key] = (now, result)
+    return result
+
+
+def _section_data_columns(sheet, sec: dict) -> list[tuple[int, str]]:
+    """Return [(col_idx, label), ...] for a section, excluding DATE/TOTAL/empty."""
+    header = sheet.row_values(sec["header_row"])
     out: list[tuple[int, str]] = []
-    for i in range(cfg["col_start"] - 1, min(end, len(header))):
+    for i in range(sec["col_start"] - 1, min(sec["col_end"], len(header))):
         label = header[i].strip()
         if not label or label.upper() in ("DATE", "TOTAL"):
             continue
@@ -720,38 +776,21 @@ def _section_columns(sheet, section_key: str) -> list[tuple[int, str]]:
     return out
 
 
-def _section_date_column(sheet, section_key: str) -> int:
-    """Find the first DATE column inside a section's column range by reading the
-    actual header row. Falls back to col_start if no DATE label is found."""
-    cfg = SECTION_CONFIG[section_key]
-    header = sheet.row_values(cfg["header_row"])
-    end = cfg["col_end"] or len(header)
-    for i in range(cfg["col_start"] - 1, min(end, len(header))):
-        if header[i].strip().upper() == "DATE":
-            return i + 1
-    return cfg["col_start"]
-
-
-def _find_in_section(sheet, section_key: str, item: str) -> tuple[int, str] | None:
-    """Fuzzy-find a column in a single section. Returns (col_idx, label) or None."""
-    candidates = _section_columns(sheet, section_key)
+def _find_in_section_dynamic(sheet, sec: dict, item: str) -> tuple[int, str] | None:
+    """Fuzzy-find item in a discovered section. Returns (col_idx, label) or None."""
+    candidates = _section_data_columns(sheet, sec)
     if not candidates:
         return None
-
     target = _normalize_label(item)
     if not target:
         return None
-
-    # 1. Exact normalized match
     for idx, label in candidates:
         if _normalize_label(label) == target:
             return (idx, label)
-    # 2. Substring either direction
     for idx, label in candidates:
         norm = _normalize_label(label)
         if target in norm or norm in target:
             return (idx, label)
-    # 3. Difflib fuzzy
     import difflib
     norm_to_pair = {_normalize_label(label): (idx, label) for idx, label in candidates}
     close = difflib.get_close_matches(target, list(norm_to_pair.keys()), n=1, cutoff=0.7)
@@ -760,80 +799,128 @@ def _find_in_section(sheet, section_key: str, item: str) -> tuple[int, str] | No
     return None
 
 
+def _find_check_column(sheet, sec: dict) -> int | None:
+    """Find a 'check #' or 'CH#' column inside a section. Returns col_idx or None."""
+    header = sheet.row_values(sec["header_row"])
+    for i in range(sec["col_start"] - 1, min(sec["col_end"], len(header))):
+        norm = _normalize_label(header[i])
+        if "check" in norm or norm.endswith("ch") or "ch#" in header[i].lower().replace(" ", ""):
+            return i + 1
+    return None
+
+
+# Friendly hint aliases — accepted in the `section` arg to bias the search.
+_SECTION_ALIASES = {
+    "invoice":  ["inventory", "cogs", "invoice"],
+    "expense":  ["expense", "expenses"],
+    "payroll":  ["payroll"],
+    "rebate":   ["rebate", "rebates"],
+    "revenue":  ["profit", "revenue", "took home"],
+    "gas":      ["gas invoice", "gas"],
+}
+
+
+def _filter_sections_by_hint(sections: list[dict], hint: str) -> list[dict]:
+    """Filter discovered sections to those whose title matches a hint alias."""
+    hint_norm = _normalize_label(hint)
+    aliases = _SECTION_ALIASES.get(hint.lower().strip(), [hint.lower().strip()])
+    alias_norms = [_normalize_label(a) for a in aliases]
+    out = []
+    for s in sections:
+        title_norm = _normalize_label(s["title"])
+        if any(a in title_norm or title_norm in a for a in alias_norms):
+            out.append(s)
+    return out
+
+
 def log_entry(
     item: str,
     amount: float,
     entry_date: date,
     section: str | None = None,
+    check_number: str | None = None,
 ) -> dict:
     """Log a monetary entry to the right cell in the monthly tab.
 
-    item: vendor/employee/category name as the user said it.
-    section: optional hint — one of {invoice, expense, payroll, rebate, revenue}.
-             If omitted, search every section.
-
-    Returns a dict the caller can inspect:
-      success:    {"ok": True, "section": "invoice", "label": "PEPSI", "cell": "B41"}
-      ambiguous:  {"ok": False, "reason": "ambiguous", "matches": [{section, label}, ...]}
-      not_found:  {"ok": False, "reason": "not_found", "available": {section: [labels]}}
+    Discovers sections from the sheet itself (every "DATE" header marks a section),
+    fuzzy-matches `item` against the section's column labels, writes the amount,
+    stamps the section's DATE column, and (if check_number given) writes that to
+    the matching CHECK# / CH# column in the same section.
     """
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
-    if section and section not in SECTION_CONFIG:
-        return {
-            "ok": False,
-            "reason": "bad_section",
-            "valid_sections": list(SECTION_CONFIG.keys()),
-        }
+    sections = _discover_sections(sheet)
+    if not sections:
+        return {"ok": False, "reason": "no_sections", "search": item}
 
-    sections_to_search = [section] if section else list(SECTION_CONFIG.keys())
+    if section:
+        sections = _filter_sections_by_hint(sections, section)
+        if not sections:
+            return {"ok": False, "reason": "bad_section", "search": item}
 
     matches: list[dict] = []
-    for sec in sections_to_search:
-        m = _find_in_section(sheet, sec, item)
+    for sec in sections:
+        m = _find_in_section_dynamic(sheet, sec, item)
         if m:
             col_idx, label = m
-            matches.append({"section": sec, "col_idx": col_idx, "label": label})
+            matches.append({"sec": sec, "col_idx": col_idx, "label": label})
 
     if not matches:
-        available = {sec: [lbl for _, lbl in _section_columns(sheet, sec)] for sec in sections_to_search}
+        # Invalidate cache once in case the user just added a column.
+        _SECTION_CACHE.pop((sheet.spreadsheet.id, sheet.title), None)
+        sections = _discover_sections(sheet)
+        if section:
+            sections = _filter_sections_by_hint(sections, section)
+        for sec in sections:
+            m = _find_in_section_dynamic(sheet, sec, item)
+            if m:
+                col_idx, label = m
+                matches.append({"sec": sec, "col_idx": col_idx, "label": label})
+
+    if not matches:
+        available = {s["title"]: [lbl for _, lbl in _section_data_columns(sheet, s)] for s in sections}
         return {"ok": False, "reason": "not_found", "available": available, "search": item}
 
     if len(matches) > 1:
         return {
             "ok": False,
             "reason": "ambiguous",
-            "matches": [{"section": m["section"], "label": m["label"]} for m in matches],
+            "matches": [{"section": m["sec"]["title"], "label": m["label"]} for m in matches],
         }
 
-    # Single match — write
     chosen = matches[0]
-    cfg = SECTION_CONFIG[chosen["section"]]
-    target_row = cfg["data_start_row"] + entry_date.day - 1
+    sec = chosen["sec"]
+    target_row = sec["data_start_row"] + entry_date.day - 1
     cell = gspread.utils.rowcol_to_a1(target_row, chosen["col_idx"])
-    # Find each section's own DATE column from the header row — not assumed.
-    date_col = _section_date_column(sheet, chosen["section"])
-    date_cell = gspread.utils.rowcol_to_a1(target_row, date_col)
+    date_cell = gspread.utils.rowcol_to_a1(target_row, sec["col_start"])
 
-    # Write the amount, and also stamp the date in col 1 if that cell is empty.
     sheet.update(cell, [[amount]])
+
+    # Stamp the section's DATE column if empty.
     try:
         date_existing = sheet.get(date_cell)
         date_is_empty = not (date_existing and date_existing[0] and date_existing[0][0].strip())
     except Exception:
         date_is_empty = True
     if date_is_empty:
-        date_str = entry_date.strftime("%-m/%-d")  # "5/3"
-        sheet.update(date_cell, [[date_str]], value_input_option="USER_ENTERED")
+        sheet.update(date_cell, [[entry_date.strftime("%-m/%-d")]], value_input_option="USER_ENTERED")
+
+    # If a check number was provided, write it to the section's CH# column.
+    check_cell = None
+    if check_number:
+        check_col = _find_check_column(sheet, sec)
+        if check_col:
+            check_cell = gspread.utils.rowcol_to_a1(target_row, check_col)
+            sheet.update(check_cell, [[check_number]], value_input_option="USER_ENTERED")
 
     return {
         "ok": True,
-        "section": chosen["section"],
-        "section_label": cfg["label"],
+        "section": sec["title"],
         "label": chosen["label"],
         "cell": cell,
+        "check_cell": check_cell,
         "amount": amount,
         "date": str(entry_date),
     }
