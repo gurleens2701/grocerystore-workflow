@@ -888,10 +888,22 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
     set_active_store(store_id)
     store_name = _get_store_name(store_id)
     tools = _build_tool_list(store_id)
-    llm = ChatAnthropic(
+    primary_llm = ChatAnthropic(
         model="claude-sonnet-4-6",
         api_key=settings.anthropic_api_key,
     ).bind_tools(tools)
+    fallback_llm = ChatAnthropic(
+        model="claude-haiku-4-5-20251001",
+        api_key=settings.anthropic_api_key,
+    ).bind_tools(tools)
+
+    def _invoke_with_fallback(msgs):
+        from anthropic._exceptions import OverloadedError
+        try:
+            return primary_llm.invoke(msgs)
+        except OverloadedError:
+            log.warning("Sonnet 4.6 overloaded, falling back to Haiku 4.5 for store=%s", store_id)
+            return fallback_llm.invoke(msgs)
 
     owner_line = f" The owner's name is {owner_name} — use their name occasionally to be friendly." if owner_name else ""
 
@@ -913,7 +925,7 @@ def run_agent(question: str, store_id: str, owner_name: str = "",
     messages.append(HumanMessage(content=question))
 
     for _ in range(8):  # max rounds of tool calls
-        response = llm.invoke(messages)
+        response = _invoke_with_fallback(messages)
         messages.append(response)
 
         if not getattr(response, "tool_calls", None):
