@@ -594,6 +594,74 @@ def log_daily_sales(sales_data: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Smart column lookup — reads the actual sheet headers, no hardcoded lists
+# ---------------------------------------------------------------------------
+
+def _normalize_label(s: str) -> str:
+    """Lowercase + drop non-alphanumeric — for fuzzy matching column headers."""
+    return "".join(c for c in s.lower() if c.isalnum())
+
+
+def find_column_in_section(
+    sheet,
+    header_row: int,
+    value_name: str,
+    col_start: int = 1,
+    col_end: int | None = None,
+) -> tuple[int, str] | None:
+    """Read the sheet's header row, fuzzy-find the column for value_name.
+
+    Returns (1-based column index, actual label as it appears in the sheet)
+    or None if no reasonable match.
+
+    col_start/col_end constrain the search to a sub-range of the row — used
+    when multiple sections share a header row (e.g. PAYROLL starts at col 20).
+
+    Match priority:
+      1. Exact (case-insensitive, alphanumerics only)
+      2. Substring either direction ("pepsi" → "PEPSI CO", "PEPSI" → "pepsi cola")
+      3. Difflib close-match (handles "bonbright" ↔ "BONERIGHT", "ligget" ↔ "LIGGETT")
+    """
+    header = sheet.row_values(header_row)
+    if col_end is None:
+        col_end = len(header)
+
+    candidates: list[tuple[int, str]] = []
+    for i in range(col_start - 1, min(col_end, len(header))):
+        label = header[i].strip()
+        if not label or label.upper() in ("DATE", "TOTAL"):
+            continue
+        candidates.append((i + 1, label))
+
+    if not candidates:
+        return None
+
+    target = _normalize_label(value_name)
+    if not target:
+        return None
+
+    # 1. Exact normalized match
+    for idx, label in candidates:
+        if _normalize_label(label) == target:
+            return (idx, label)
+
+    # 2. Substring either direction
+    for idx, label in candidates:
+        norm = _normalize_label(label)
+        if target in norm or norm in target:
+            return (idx, label)
+
+    # 3. Difflib fuzzy match
+    import difflib
+    norm_to_pair = {_normalize_label(label): (idx, label) for idx, label in candidates}
+    close = difflib.get_close_matches(target, list(norm_to_pair.keys()), n=1, cutoff=0.7)
+    if close:
+        return norm_to_pair[close[0]]
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # COGS / Invoice logging
 # ---------------------------------------------------------------------------
 
@@ -612,20 +680,15 @@ def log_cogs_entry(
     if entry_date is None:
         entry_date = date.today()
 
-    exact_vendor = resolve_vendor(vendor)
-    if exact_vendor not in _VENDOR_COL_INDEX or exact_vendor in ("DATE", "TOTAL"):
-        # Unknown vendor — log to a notes column at the end
-        col_idx = len(COGS_VENDOR_COLS) + 1
-        label = vendor
-    else:
-        col_idx = _VENDOR_COL_INDEX[exact_vendor]
-        label = exact_vendor
-
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
-    # Row = COGS_DATA_START + (day - 1)
+    match = find_column_in_section(sheet, _COGS_HEADER_ROW, vendor)
+    if not match:
+        return f"⚠️ Vendor '{vendor}' has no matching column in the COGS section. Add a column to the sheet, or check the spelling."
+    col_idx, label = match
+
     target_row = _COGS_DATA_START + entry_date.day - 1
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
     sheet.update(cell, [[amount]])
@@ -638,24 +701,23 @@ def mark_invoice_paid(vendor: str, entry_date: date) -> str:
     Turn the COGS cell for this vendor+date green to indicate the bank confirmed payment.
     If the vendor isn't found in the sheet, silently returns.
     """
-    exact_vendor = resolve_vendor(vendor)
-    if exact_vendor not in _VENDOR_COL_INDEX or exact_vendor in ("DATE", "TOTAL"):
-        return f"Vendor {vendor!r} not in COGS columns — skipped paid mark"
-
-    col_idx = _VENDOR_COL_INDEX[exact_vendor]
-    target_row = _COGS_DATA_START + entry_date.day - 1
-    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
-
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
 
-    # Green background = bank confirmed payment
+    match = find_column_in_section(sheet, _COGS_HEADER_ROW, vendor)
+    if not match:
+        return f"Vendor {vendor!r} not in COGS columns — skipped paid mark"
+    col_idx, label = match
+
+    target_row = _COGS_DATA_START + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+
     sheet.format(cell, {
         "backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}  # soft green
     })
 
-    return f"Marked PAID: {exact_vendor} on {entry_date} (cell {cell} → green)"
+    return f"Marked PAID: {label} on {entry_date} (cell {cell} → green)"
 
 
 # ---------------------------------------------------------------------------
@@ -707,21 +769,24 @@ def log_expense(category: str, amount: float, entry_date: date | None = None) ->
     if entry_date is None:
         entry_date = date.today()
 
-    col_name = resolve_expense_category(category)
-    if not col_name:
-        col_name = "INVENTORY"  # fallback column for unrecognised categories
-
-    col_idx = EXPENSES_HEADERS.index(col_name) + 1  # 1-based
-
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+
+    # EXPENSES section is cols 1 through (PAYROLL start - 1) in the same header row.
+    match = find_column_in_section(
+        sheet, _EXP_HEADER_ROW, category,
+        col_start=1, col_end=_PAYROLL_COL_START - 1,
+    )
+    if not match:
+        return f"⚠️ Expense '{category}' has no matching column. Add a column to the sheet or check spelling."
+    col_idx, label = match
 
     target_row = _EXP_DATA_START + entry_date.day - 1
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
     sheet.update(cell, [[amount]])
 
-    return f"Expense logged: {col_name} ${amount:.2f} on {entry_date}"
+    return f"Expense logged: {label} ${amount:.2f} on {entry_date}"
 
 
 # ---------------------------------------------------------------------------
@@ -741,23 +806,24 @@ def log_payroll(employee: str, amount: float, entry_date: date | None = None) ->
     if entry_date is None:
         entry_date = date.today()
 
-    col_name = resolve_payroll_name(employee)
-    if not col_name:
-        return f"⚠️ Employee '{employee}' not found in payroll. Known names: {', '.join(h for h in PAYROLL_HEADERS if h not in ('DATE', 'TOTAL'))}"
-
-    # col index within PAYROLL_HEADERS (0-based) → absolute sheet column (1-based)
-    local_idx = PAYROLL_HEADERS.index(col_name)
-    col_idx = _PAYROLL_COL_START + local_idx
-
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+
+    # PAYROLL shares the EXPENSES header row but starts at _PAYROLL_COL_START.
+    match = find_column_in_section(
+        sheet, _EXP_HEADER_ROW, employee,
+        col_start=_PAYROLL_COL_START,
+    )
+    if not match:
+        return f"⚠️ Employee '{employee}' has no matching payroll column in the sheet."
+    col_idx, label = match
 
     target_row = _EXP_DATA_START + entry_date.day - 1
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
     sheet.update(cell, [[amount]])
 
-    return f"Payroll logged: {col_name} ${amount:.2f} on {entry_date}"
+    return f"Payroll logged: {label} ${amount:.2f} on {entry_date}"
 
 
 # ---------------------------------------------------------------------------
@@ -803,21 +869,24 @@ def log_rebate(vendor: str, amount: float, entry_date: date | None = None) -> st
     if entry_date is None:
         entry_date = date.today()
 
-    col_name = resolve_rebate_vendor(vendor)
-    if not col_name:
-        col_name = "MISCELLANEOUS"
-
-    col_idx = REBATES_HEADERS.index(col_name) + 1  # 1-based (starts at col A = 1)
-
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+
+    # REBATES occupies cols 1 through (PROFIT start - 1) on the REVENUES header row.
+    match = find_column_in_section(
+        sheet, _REV_HEADER_ROW, vendor,
+        col_start=1, col_end=_PROFIT_COL_START - 1,
+    )
+    if not match:
+        return f"⚠️ Rebate vendor '{vendor}' has no matching column in the REBATES section."
+    col_idx, label = match
 
     target_row = _REV_DATA_START + entry_date.day - 1
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
     sheet.update(cell, [[amount]])
 
-    return f"Rebate logged: {col_name} ${amount:.2f} on {entry_date}"
+    return f"Rebate logged: {label} ${amount:.2f} on {entry_date}"
 
 
 # ---------------------------------------------------------------------------
@@ -849,22 +918,24 @@ def log_revenue(category: str, amount: float, entry_date: date | None = None) ->
     if entry_date is None:
         entry_date = date.today()
 
-    col_name = resolve_revenue_category(category)
-    if not col_name:
-        col_name = "EXTRA"
-
-    # PROFIT TOOK HOME columns start at _PROFIT_COL_START
-    col_idx = _PROFIT_COL_START + PROFIT_HEADERS.index(col_name)
-
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+
+    # PROFIT TOOK HOME starts at _PROFIT_COL_START on the REVENUES header row.
+    match = find_column_in_section(
+        sheet, _REV_HEADER_ROW, category,
+        col_start=_PROFIT_COL_START,
+    )
+    if not match:
+        return f"⚠️ Revenue category '{category}' has no matching column in PROFIT TOOK HOME."
+    col_idx, label = match
 
     target_row = _REV_DATA_START + entry_date.day - 1
     cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
     sheet.update(cell, [[amount]])
 
-    return f"Revenue logged: {col_name} ${amount:.2f} on {entry_date}"
+    return f"Revenue logged: {label} ${amount:.2f} on {entry_date}"
 
 
 # ---------------------------------------------------------------------------
