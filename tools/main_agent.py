@@ -856,24 +856,15 @@ def _build_tool_list(store_id: str) -> list:
     for that store — the tool_name row must exist and have enabled=true.
     """
     try:
-        import asyncio as _aio
-        from sqlalchemy import select
-        from db.database import get_async_session
         from db.models import StoreToolPolicy
-
-        async def _query():
-            async with get_async_session() as session:
-                rows = (await session.execute(
-                    select(StoreToolPolicy).where(
-                        StoreToolPolicy.store_id == store_id,
-                        StoreToolPolicy.enabled == True,
-                    )
-                )).scalars().all()
-                return {r.tool_name for r in rows}
-
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            enabled = pool.submit(_aio.run, _query()).result(timeout=5)
+        with get_sync_session() as session:
+            rows = session.execute(
+                select(StoreToolPolicy).where(
+                    StoreToolPolicy.store_id == store_id,
+                    StoreToolPolicy.enabled == True,
+                )
+            ).scalars().all()
+            enabled = {r.tool_name for r in rows}
 
         if not enabled:
             return _ALL_TOOLS  # fallback: nothing in DB yet
