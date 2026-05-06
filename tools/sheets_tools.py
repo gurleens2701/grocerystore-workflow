@@ -707,7 +707,7 @@ SECTION_CONFIG: dict[str, dict] = {
 
 
 def _section_columns(sheet, section_key: str) -> list[tuple[int, str]]:
-    """Read the section's header row from the actual sheet, return [(col_idx, label), ...]."""
+    """Read the section's header row, return [(col_idx, label), ...] excluding DATE/TOTAL."""
     cfg = SECTION_CONFIG[section_key]
     header = sheet.row_values(cfg["header_row"])
     end = cfg["col_end"] or len(header)
@@ -718,6 +718,18 @@ def _section_columns(sheet, section_key: str) -> list[tuple[int, str]]:
             continue
         out.append((i + 1, label))
     return out
+
+
+def _section_date_column(sheet, section_key: str) -> int:
+    """Find the first DATE column inside a section's column range by reading the
+    actual header row. Falls back to col_start if no DATE label is found."""
+    cfg = SECTION_CONFIG[section_key]
+    header = sheet.row_values(cfg["header_row"])
+    end = cfg["col_end"] or len(header)
+    for i in range(cfg["col_start"] - 1, min(end, len(header))):
+        if header[i].strip().upper() == "DATE":
+            return i + 1
+    return cfg["col_start"]
 
 
 def _find_in_section(sheet, section_key: str, item: str) -> tuple[int, str] | None:
@@ -801,9 +813,9 @@ def log_entry(
     cfg = SECTION_CONFIG[chosen["section"]]
     target_row = cfg["data_start_row"] + entry_date.day - 1
     cell = gspread.utils.rowcol_to_a1(target_row, chosen["col_idx"])
-    # Each section has its own DATE column at col_start (e.g. PAYROLL date = col 20,
-    # PROFIT TOOK HOME date = col 18). Don't write all dates to column A.
-    date_cell = gspread.utils.rowcol_to_a1(target_row, cfg["col_start"])
+    # Find each section's own DATE column from the header row — not assumed.
+    date_col = _section_date_column(sheet, chosen["section"])
+    date_cell = gspread.utils.rowcol_to_a1(target_row, date_col)
 
     # Write the amount, and also stamp the date in col 1 if that cell is empty.
     sheet.update(cell, [[amount]])
