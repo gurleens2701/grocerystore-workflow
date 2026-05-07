@@ -194,7 +194,10 @@ async def _match_to_sheet(description: str, amount: float) -> dict | None:
     loop       = asyncio.get_event_loop()
     abs_amount = abs(amount)
     is_deposit = amount < 0
-    is_check   = bool(re.match(r"^check\s+\d+", description.lower()))
+    # Match common check description formats: "CHECK 1234", "CHECK PAID",
+    # "CHECK #1234", "CHK 1234", "WITHDRAWAL CHECK". Hamilton's bank uses
+    # "CHECK PAID" (no number) — Moraine's uses "CHECK 1234".
+    is_check   = bool(re.search(r"\bchec?k\b", description.lower()))
 
     if is_deposit:
         # Money IN — look in rebate section by vendor name
