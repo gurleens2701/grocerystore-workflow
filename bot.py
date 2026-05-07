@@ -2123,19 +2123,21 @@ _REVIEW_TYPES = [
 ]
 
 
+_PROFIT_TOOK_HOME_STORES = {"moraine", "hamiltonomoil"}
+
+
 def _review_types_for_active_store() -> list[tuple[str, str]]:
     """Return the bank-review category buttons for the active store.
 
-    Moraine has a PROFIT TOOK HOME section the owner uses for personal draws
-    (committe payments, car, food, house, etc.). Other stores don't use this
-    flow yet. Adding it conditionally so the rest of the keyboard stays
-    identical for everyone else.
+    Stores in _PROFIT_TOOK_HOME_STORES have a PROFIT TOOK HOME section the
+    owner uses for personal draws (committe, car, food, house, etc.). To opt
+    a new store in, just add its store_id to that set.
     """
     try:
         sid = get_active_store(required=False)
     except Exception:
         sid = None
-    if sid == "moraine":
+    if sid in _PROFIT_TOOK_HOME_STORES:
         return [
             ("Vendor Invoice",   "invoice"),
             ("Expense",          "expense"),
