@@ -1494,108 +1494,71 @@ def _read_cell_value(sheet, cell: str) -> float | None:
     return None
 
 
-def log_expense_and_highlight(category: str, amount: float, entry_date: date) -> str:
-    """Log expense to sheet if cell is empty, always highlight green.
-    Preserves any existing manually-entered value in the cell.
-    """
-    col_name = resolve_expense_category(category)
-    if not col_name:
-        col_name = "INVENTORY"  # fallback
-    col_idx = EXPENSES_HEADERS.index(col_name) + 1
-    target_row = _EXP_DATA_START + entry_date.day - 1
-    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+def _log_and_highlight_dynamic(item: str, amount: float, entry_date: date, section_hint: str) -> str:
+    """Find the right cell via dynamic section discovery, log if empty, highlight green.
 
+    Used by the bank reconciler to mark cells when the bank confirms a payment.
+    If the cell has an existing value (owner typed it manually before the bank
+    cleared), we PRESERVE it and just highlight — never overwrite manual data.
+    """
     client = _get_client()
-    sheet = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
+    spreadsheet = client.open_by_key(get_store_sheet_id())
+    sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+
+    sections = _discover_sections(sheet)
+    sections = _filter_sections_by_hint(sections, section_hint)
+
+    matches: list[tuple[dict, tuple[int, str]]] = []
+    for sec in sections:
+        m = _find_in_section_dynamic(sheet, sec, item)
+        if m:
+            matches.append((sec, m))
+
+    if not matches:
+        return f"'{item}' not in {section_hint} columns — skipped"
+    if len(matches) > 1:
+        # Reconciler path is automated — pick the first deterministically rather
+        # than asking the user. Log the ambiguity so we can investigate later.
+        log.warning("ambiguous section match for item=%r section_hint=%r — picked first", item, section_hint)
+
+    sec, (col_idx, label) = matches[0]
+    target_row = sec["data_start_row"] + entry_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
 
     existing = _read_cell_value(sheet, cell)
     if existing is None:
         sheet.update(cell, [[amount]])
+        # Stamp section's own DATE column if empty
+        date_cell = gspread.utils.rowcol_to_a1(target_row, sec["col_start"])
+        try:
+            date_existing = sheet.get(date_cell)
+            date_is_empty = not (date_existing and date_existing[0] and date_existing[0][0].strip())
+        except Exception:
+            date_is_empty = True
+        if date_is_empty:
+            sheet.update(date_cell, [[entry_date.strftime("%-m/%-d")]], value_input_option="USER_ENTERED")
         action = f"logged ${amount:.2f}"
     else:
         action = f"kept existing ${existing:.2f}"
 
     sheet.format(cell, {"backgroundColor": _PAID_GREEN})
-    return f"Expense {col_name} on {entry_date}: {action}, highlighted"
+    return f"{sec['title']} {label} on {entry_date}: {action}, highlighted"
+
+
+def log_expense_and_highlight(category: str, amount: float, entry_date: date) -> str:
+    return _log_and_highlight_dynamic(category, amount, entry_date, "expense")
 
 
 def log_invoice_and_highlight(vendor: str, amount: float, entry_date: date) -> str:
-    """Log COGS invoice to sheet if cell is empty, always highlight green.
-    Preserves any existing manually-entered value in the cell.
-    """
-    exact_vendor = resolve_vendor(vendor)
-    if exact_vendor not in _VENDOR_COL_INDEX or exact_vendor in ("DATE", "TOTAL"):
-        return f"Vendor {vendor!r} not in COGS columns — skipped"
-
-    col_idx = _VENDOR_COL_INDEX[exact_vendor]
-    target_row = _COGS_DATA_START + entry_date.day - 1
-    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
-
-    client = _get_client()
-    sheet = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
-
-    existing = _read_cell_value(sheet, cell)
-    if existing is None:
-        sheet.update(cell, [[amount]])
-        action = f"logged ${amount:.2f}"
-    else:
-        action = f"kept existing ${existing:.2f}"
-
-    sheet.format(cell, {"backgroundColor": _PAID_GREEN})
-    return f"COGS {exact_vendor} on {entry_date}: {action}, highlighted"
+    return _log_and_highlight_dynamic(vendor, amount, entry_date, "invoice")
 
 
 def log_rebate_and_highlight(vendor: str, amount: float, entry_date: date) -> str:
-    """Log rebate to sheet if cell is empty, always highlight green.
-    Preserves any existing manually-entered value in the cell.
-    """
-    col_name = resolve_rebate_vendor(vendor)
-    if not col_name:
-        col_name = "MISCELLANEOUS"
-    col_idx = REBATES_HEADERS.index(col_name) + 1
-    target_row = _REV_DATA_START + entry_date.day - 1
-    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
-
-    client = _get_client()
-    sheet = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
-
-    existing = _read_cell_value(sheet, cell)
-    if existing is None:
-        sheet.update(cell, [[amount]])
-        action = f"logged ${amount:.2f}"
-    else:
-        action = f"kept existing ${existing:.2f}"
-
-    sheet.format(cell, {"backgroundColor": _PAID_GREEN})
-    return f"Rebate {col_name} on {entry_date}: {action}, highlighted"
+    return _log_and_highlight_dynamic(vendor, amount, entry_date, "rebate")
 
 
 def log_payroll_and_highlight(employee: str, amount: float, entry_date: date) -> str:
-    """Log payroll to sheet if cell is empty, always highlight green.
-    Preserves any existing manually-entered value in the cell.
-    If employee name can't be resolved to a known column, skips cleanly.
-    """
-    col_name = resolve_payroll_name(employee)
-    if not col_name:
-        return f"Payroll employee '{employee}' not in PAYROLL columns — skipped"
-
-    local_idx = PAYROLL_HEADERS.index(col_name)
-    col_idx = _PAYROLL_COL_START + local_idx
-    target_row = _EXP_DATA_START + entry_date.day - 1
-    cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
-
-    client = _get_client()
-    sheet = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
-
-    existing = _read_cell_value(sheet, cell)
-    if existing is None:
-        sheet.update(cell, [[amount]])
-        action = f"logged ${amount:.2f}"
-    else:
-        action = f"kept existing ${existing:.2f}"
-
-    sheet.format(cell, {"backgroundColor": _PAID_GREEN})
-    return f"Payroll {col_name} on {entry_date}: {action}, highlighted"
+    return _log_and_highlight_dynamic(employee, amount, entry_date, "payroll")
 
 
 def match_description_to_cogs_vendor(description: str) -> str | None:

@@ -2124,31 +2124,45 @@ _REVIEW_TYPES = [
 
 
 def _get_subcat_options(rtype: str) -> list[str]:
-    """Return canonical subcategory options for a given reconcile type.
+    """Return subcategory options for a reconcile type by reading the ACTIVE
+    store's actual Google Sheet. Whatever columns the owner has under the
+    matching section ARE the options — no hardcoded vendor or category lists.
 
-    Sourced from tools/sheets_tools.py so the buttons always match the
-    columns in the Google Sheet. Returns [] for types that don't have
-    a fixed subcategory list.
+    rtype: "expense" | "rebate" | "payroll" | "invoice"
     """
     try:
         from tools.sheets_tools import (
-            EXPENSES_HEADERS,
-            REBATES_HEADERS,
-            PAYROLL_HEADERS,
-            COGS_VENDOR_COLS,
+            _get_client,
+            _get_or_create_monthly_tab,
+            _discover_sections,
+            _section_data_columns,
+            _filter_sections_by_hint,
+            get_store_sheet_id,
         )
+        from datetime import date as _date
     except ImportError:
         return []
-    skip = {"DATE", "TOTAL"}
-    if rtype == "expense":
-        return [h for h in EXPENSES_HEADERS if h not in skip]
-    if rtype == "rebate":
-        return [h for h in REBATES_HEADERS if h not in skip]
-    if rtype == "payroll":
-        return [h for h in PAYROLL_HEADERS if h not in skip]
-    if rtype == "invoice":
-        return [h for h in COGS_VENDOR_COLS if h not in skip]
-    return []
+
+    if rtype not in ("expense", "rebate", "payroll", "invoice"):
+        return []
+
+    try:
+        client = _get_client()
+        spreadsheet = client.open_by_key(get_store_sheet_id())
+        sheet = _get_or_create_monthly_tab(spreadsheet, _date.today())
+        sections = _discover_sections(sheet)
+        matched = _filter_sections_by_hint(sections, rtype)
+        labels: list[str] = []
+        seen = set()
+        for sec in matched:
+            for _, label in _section_data_columns(sheet, sec):
+                if label and label not in seen:
+                    seen.add(label)
+                    labels.append(label)
+        return labels
+    except Exception as e:
+        log.warning("_get_subcat_options dynamic read failed for rtype=%s: %s", rtype, e)
+        return []
 
 
 def _build_subcat_keyboard(rtype: str, txn_id: int) -> InlineKeyboardMarkup:
