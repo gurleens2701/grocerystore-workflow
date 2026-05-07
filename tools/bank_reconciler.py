@@ -797,25 +797,17 @@ async def get_pending_reviews(store_id: str) -> list[dict]:
 
 # ── CC settlement matching ────────────────────────────────────────────────────
 
-# CC settlement matching tolerances.
-#
-# Processors deduct a percentage fee (typically 2-3%) from the deposit, so
-# deposit is usually SHORT of the card sales total. Rounding and tips can
-# occasionally make it slightly OVER. Use percentage tolerance that scales
-# with the deposit so weekly batches work as well as single-day settlements.
-_CC_TOL_OVER_PCT  = 0.01   # deposit can be up to 1% over card (tips/credits)
-_CC_TOL_SHORT_PCT = 0.06   # deposit can be up to 6% short (covers 2-3% fee + slack)
-_CC_TOL_FLOOR     = 30.0   # absolute floor — small batches still get $30 wiggle
+# CC settlement matching tolerances
+# deposit can be up to $1 short (red flag: real shortage, call processor)
+# deposit can be up to $30 over (fine: rounding, tips, small processor credits)
+_CC_TOLERANCE_SHORT = 1.00   # deposit >= card - 1.00
+_CC_TOLERANCE_OVER  = 30.00  # deposit <= card + 30.00
 
 
 def _is_tight_match(deposit: float, card: float) -> bool:
-    """Match if deposit is within fee-adjusted tolerance of card sales."""
-    if card <= 0:
-        return False
+    """Chronological tight match: deposit within [card - $1, card + $30]."""
     diff = deposit - card
-    over_tol  = max(_CC_TOL_FLOOR, card * _CC_TOL_OVER_PCT)
-    short_tol = max(_CC_TOL_FLOOR, card * _CC_TOL_SHORT_PCT)
-    return -short_tol <= diff <= over_tol
+    return -_CC_TOLERANCE_SHORT <= diff <= _CC_TOLERANCE_OVER
 
 
 def _find_tight_ranges(
@@ -825,8 +817,7 @@ def _find_tight_ranges(
     """
     Find all contiguous ranges of daily_rows whose card totals sum to a
     tight match with the deposit amount. Handles processors that batch
-    multiple days into one deposit (Thu+Fri+Sat → Mon deposit, weekly
-    Sun-Sat → Tuesday deposit, etc.).
+    multiple days into one deposit (e.g. Thu+Fri+Sat → Monday deposit).
 
     daily_rows must be sorted oldest-first.
     Returns list of (start_idx, end_idx_inclusive, sum) tuples.
@@ -837,10 +828,8 @@ def _find_tight_ranges(
         running = 0.0
         for j in range(i, n):
             running += float(daily_rows[j].card)
-            # Stop extending once running > deposit + 1% over tolerance
-            ceiling = deposit + max(_CC_TOL_FLOOR, running * _CC_TOL_OVER_PCT)
-            if running > ceiling:
-                break
+            if running > deposit + _CC_TOLERANCE_OVER:
+                break  # any further extension will only overshoot more
             if _is_tight_match(deposit, running):
                 matches.append((i, j, round(running, 2)))
     return matches
@@ -905,11 +894,8 @@ async def check_cc_settlements(store_id: str) -> list[dict]:
             bank_amount = abs(float(dep.amount))
             dep_date = dep.transaction_date
 
-            # Window: look backward up to 14 days, never forward.
-            # Most processors settle in 1-3 days, but new accounts and
-            # slow processors can hold a week or more. 14 days handles
-            # weekly bundling + processing delay safely.
-            date_lo = dep_date - timedelta(days=14)
+            # Window: look backward up to 7 days, never forward.
+            date_lo = dep_date - timedelta(days=7)
             date_hi = dep_date
 
             daily_rows = (await session.execute(
