@@ -1559,6 +1559,10 @@ def log_payroll_and_highlight(employee: str, amount: float, entry_date: date) ->
     return _log_and_highlight_dynamic(employee, amount, entry_date, "payroll")
 
 
+def log_revenue_and_highlight(category: str, amount: float, entry_date: date) -> str:
+    return _log_and_highlight_dynamic(category, amount, entry_date, "revenue")
+
+
 def _match_description_to_section(description: str, section_hint: str) -> str | None:
     """Find a column in `section_hint` whose label appears as a word in
     `description`. Returns the matched column LABEL (as it appears in the

@@ -2123,12 +2123,38 @@ _REVIEW_TYPES = [
 ]
 
 
+def _review_types_for_active_store() -> list[tuple[str, str]]:
+    """Return the bank-review category buttons for the active store.
+
+    Moraine has a PROFIT TOOK HOME section the owner uses for personal draws
+    (committe payments, car, food, house, etc.). Other stores don't use this
+    flow yet. Adding it conditionally so the rest of the keyboard stays
+    identical for everyone else.
+    """
+    try:
+        sid = get_active_store(required=False)
+    except Exception:
+        sid = None
+    if sid == "moraine":
+        return [
+            ("Vendor Invoice",   "invoice"),
+            ("Expense",          "expense"),
+            ("CC Settlement",    "cc_settlement"),
+            ("Rebate",           "rebate"),
+            ("Payroll",          "payroll"),
+            ("Profit Took Home", "revenue"),
+            ("Skip / Fee",       "skip"),
+            ("✏️ Other (type)",  "other"),
+        ]
+    return _REVIEW_TYPES
+
+
 def _get_subcat_options(rtype: str) -> list[str]:
     """Return subcategory options for a reconcile type by reading the ACTIVE
     store's actual Google Sheet. Whatever columns the owner has under the
     matching section ARE the options — no hardcoded vendor or category lists.
 
-    rtype: "expense" | "rebate" | "payroll" | "invoice"
+    rtype: "expense" | "rebate" | "payroll" | "invoice" | "revenue"
     """
     try:
         from tools.sheets_tools import (
@@ -2143,7 +2169,7 @@ def _get_subcat_options(rtype: str) -> list[str]:
     except ImportError:
         return []
 
-    if rtype not in ("expense", "rebate", "payroll", "invoice"):
+    if rtype not in ("expense", "rebate", "payroll", "invoice", "revenue"):
         return []
 
     try:
@@ -2305,7 +2331,7 @@ async def send_bank_review_request(bot: Bot, txn: dict) -> None:
     )
     keyboard = [
         [InlineKeyboardButton(label, callback_data=f"bk:{rtype}:{txn['id']}")]
-        for label, rtype in _REVIEW_TYPES
+        for label, rtype in _review_types_for_active_store()
     ]
     msg = await bot.send_message(
         chat_id=await _get_active_chat_id(),
@@ -2612,7 +2638,7 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await clear_state(store_id, f"bank_match_{txn_id}")
             keyboard = [
                 [InlineKeyboardButton(label, callback_data=f"bk:{rtype}:{txn_id}")]
-                for label, rtype in _REVIEW_TYPES
+                for label, rtype in _review_types_for_active_store()
             ]
             await query.edit_message_text(
                 "Ok — what category is this transaction?",
@@ -2636,7 +2662,7 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             # User wants to change — show full category keyboard
             keyboard = [
                 [InlineKeyboardButton(label, callback_data=f"bk:{rtype}:{txn_id}")]
-                for label, rtype in _REVIEW_TYPES
+                for label, rtype in _review_types_for_active_store()
             ]
             await query.edit_message_text(
                 "What category should this transaction be?",
@@ -2678,6 +2704,7 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             "expense":  "expense category (e.g. Rent, Insurance, Utilities)",
             "rebate":   "rebate source",
             "payroll":  "employee name",
+            "revenue":  "profit-took-home category (e.g. Committe, Car Payment, Food)",
         }
         await query.edit_message_text(
             f"✏️ Type the {prompt_map.get(rtype, 'name')}:",
@@ -2695,12 +2722,13 @@ async def handle_bank_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     store_id = get_active_store()
 
     # For known types that have fixed subcategory lists, show a button keyboard
-    if reconcile_type in ("invoice", "expense", "rebate", "payroll"):
+    if reconcile_type in ("invoice", "expense", "rebate", "payroll", "revenue"):
         rtype_label = {
             "invoice": "vendor",
             "expense": "expense category",
             "rebate":  "rebate source",
             "payroll": "employee",
+            "revenue": "profit-took-home category",
         }[reconcile_type]
         await query.edit_message_text(
             f"Which {rtype_label}?",

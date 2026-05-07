@@ -758,6 +758,37 @@ async def _auto_log(
         except Exception as e:
             log.warning("Sheet payroll write failed for %s: %s", subcategory, e)
 
+    elif reconcile_type == "revenue":
+        # Profit took home — log to canonical.revenues + sheet PROFIT TOOK HOME
+        from sqlalchemy import select, and_
+        from db.models import Revenue
+        cat_label = subcategory or description[:64]
+        async with get_async_session() as session:
+            existing = (await session.execute(
+                select(Revenue).where(and_(
+                    Revenue.store_id == store_id,
+                    Revenue.revenue_date == txn_date,
+                    Revenue.category == cat_label,
+                    Revenue.amount == dec_amount,
+                ))
+            )).scalar_one_or_none()
+            if not existing:
+                session.add(Revenue(
+                    store_id=store_id,
+                    revenue_date=txn_date,
+                    category=cat_label,
+                    amount=dec_amount,
+                    last_updated_by="bank_reconciler",
+                ))
+                await session.commit()
+                log.info("Auto-logged revenue store=%s cat=%s $%.2f", store_id, cat_label, float_amount)
+        try:
+            from tools.sheets_tools import log_revenue_and_highlight
+            result = await asyncio.to_thread(log_revenue_and_highlight, cat_label, float_amount, txn_date)
+            log.info("Sheet: %s", result)
+        except Exception as e:
+            log.warning("Sheet revenue write failed for %s: %s", subcategory, e)
+
 
 # ── Pending review queue ──────────────────────────────────────────────────────
 
