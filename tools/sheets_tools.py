@@ -705,19 +705,21 @@ def _discover_sections_uncached(sheet) -> list[dict]:
             else:
                 last_non_empty = max((c + 1 for c, v in enumerate(row) if v.strip()), default=date_col)
                 col_end = last_non_empty
-            title = _find_title_above(all_values, row_idx, date_col, col_end)
-            if not title:
-                # No distinct title above the section's column range — fall back
-                # to the first non-DATE column label (e.g. "GAS INVOICE $" for a
-                # subsection appended at the end of an existing section).
+            all_titles = _find_titles_above(all_values, row_idx, date_col, col_end)
+            primary_title = all_titles[0] if all_titles else None
+            if not primary_title:
+                # No title above the section's column range — fall back to the
+                # section's first non-DATE column label (e.g. "GAS INVOICE $").
                 for c in range(date_col, col_end + 1):
                     if c <= len(row):
                         candidate = row[c - 1].strip()
                         if candidate and candidate.upper() not in ("DATE", "TOTAL"):
-                            title = candidate
+                            primary_title = candidate
+                            all_titles = [candidate]
                             break
             sections.append({
-                "title": title or f"section_r{row_idx}_c{date_col}",
+                "title": primary_title or f"section_r{row_idx}_c{date_col}",
+                "all_titles": all_titles,
                 "header_row": row_idx,
                 "data_start_row": row_idx + 1,
                 "col_start": date_col,
@@ -726,13 +728,13 @@ def _discover_sections_uncached(sheet) -> list[dict]:
     return sections
 
 
-def _find_title_above(all_values: list, header_row_idx: int, col_start: int, col_end: int) -> str | None:
-    """Find a section title by searching rows above the header, ONLY inside
-    the section's own column range. If nothing distinct is found, the caller
-    should fall back to the section's first column label — using a parent's
-    title from outside the range causes title collisions between sub-sections.
-    """
-    for offset in (1, 2, 3):
+def _find_titles_above(all_values: list, header_row_idx: int, col_start: int, col_end: int) -> list[str]:
+    """Return EVERY non-DATE/TOTAL label found in rows above the header inside
+    the section's column range. Used to disambiguate sub-sections (e.g.
+    Hamilton's COGS has both 'INVENTORY (COGS' on row 36 and 'SPECIFIC ITEMS
+    GROCERY VENDORS' on row 37 — we need both for alias matching to work)."""
+    found: list[str] = []
+    for offset in (1, 2, 3, 4):
         title_row_idx = header_row_idx - offset
         if title_row_idx < 1:
             break
@@ -741,9 +743,9 @@ def _find_title_above(all_values: list, header_row_idx: int, col_start: int, col
             label = title_row[c].strip()
             if not label or label.upper() in ("DATE", "TOTAL"):
                 continue
-            if len(label) > 1:
-                return label
-    return None
+            if len(label) > 1 and label not in found:
+                found.append(label)
+    return found
 
 
 def _discover_sections(sheet) -> list[dict]:
@@ -835,14 +837,24 @@ _SECTION_ALIASES = {
 
 
 def _filter_sections_by_hint(sections: list[dict], hint: str) -> list[dict]:
-    """Filter discovered sections to those whose title matches a hint alias."""
-    hint_norm = _normalize_label(hint)
+    """Filter discovered sections to those whose title (or any parent title
+    above) matches a hint alias. A section is kept if any of its all_titles
+    contains an alias as a substring (or vice versa)."""
     aliases = _SECTION_ALIASES.get(hint.lower().strip(), [hint.lower().strip()])
     alias_norms = [_normalize_label(a) for a in aliases]
     out = []
     for s in sections:
-        title_norm = _normalize_label(s["title"])
-        if any(a in title_norm or title_norm in a for a in alias_norms):
+        all_titles = s.get("all_titles") or [s["title"]]
+        title_norms = [_normalize_label(t) for t in all_titles]
+        matched = False
+        for tn in title_norms:
+            for an in alias_norms:
+                if an and tn and (an in tn or tn in an):
+                    matched = True
+                    break
+            if matched:
+                break
+        if matched:
             out.append(s)
     return out
 
