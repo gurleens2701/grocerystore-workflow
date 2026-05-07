@@ -833,6 +833,7 @@ _SECTION_ALIASES = {
     "rebate":   ["rebate", "rebates"],
     "revenue":  ["profit", "revenue", "took home"],
     "gas":      ["gas invoice", "gas"],
+    "daily":    ["daily sales", "daily"],
 }
 
 
@@ -1406,30 +1407,49 @@ def mark_expense_paid(category: str, entry_date: date) -> str:
 
 
 def mark_cc_settled(sale_date: date, bank_deposit: float, bank_date: date) -> str:
-    """
-    Highlight the CREDIT column cell green for the matched sale day,
-    indicating the CC settlement cleared in the bank.
-    Adds a note with the bank deposit date and amount.
-    """
-    # CREDIT is in DAILY_HEADERS
-    credit_idx = DAILY_HEADERS.index("CREDIT") + 1  # 1-based column
-    target_row = _DAILY_DATA_START + sale_date.day - 1
-    cell = gspread.utils.rowcol_to_a1(target_row, credit_idx)
+    """Highlight the credit-card column cell green for the matched sale day.
 
+    Each store labels their card column differently — Moraine uses 'CREDIT',
+    Hamilton uses 'C.C.'. We discover the DAILY SALES section dynamically and
+    fuzzy-match the column by trying common card-payment aliases.
+    """
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     sheet = _get_or_create_monthly_tab(spreadsheet, sale_date)
 
-    # Green background
-    sheet.format(cell, {
-        "backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}
-    })
-    # Add note with bank info (gspread >=5.x)
+    # Find the DAILY SALES section (or whatever the leftmost section is on row 2-ish).
+    sections = _discover_sections(sheet)
+    daily_sections = _filter_sections_by_hint(sections, "daily")
+    if not daily_sections:
+        # Fallback: take the first discovered section (usually DAILY SALES).
+        daily_sections = sections[:1]
+
+    cc_col = None
+    matched_label = None
+    for sec in daily_sections:
+        # Try each common card-payment label, prefer the most specific match.
+        for alias in ("c.c.", "cc", "credit", "card", "ccard"):
+            m = _find_in_section_dynamic(sheet, sec, alias)
+            if m:
+                cc_col, matched_label = m
+                break
+        if cc_col:
+            break
+
+    if not cc_col:
+        return f"⚠️ No card column found in DAILY SALES — skipped CC settlement highlight"
+
+    # Day-N row inside the DAILY SALES section.
+    sec = next((s for s in daily_sections if any(c == cc_col for c, _ in _section_data_columns(sheet, s))), daily_sections[0])
+    target_row = sec["data_start_row"] + sale_date.day - 1
+    cell = gspread.utils.rowcol_to_a1(target_row, cc_col)
+
+    sheet.format(cell, {"backgroundColor": _PAID_GREEN})
     try:
         sheet.update_note(cell, f"CC settled ${bank_deposit:,.2f} on {bank_date}")
     except Exception:
-        pass  # note is optional
-    return f"Marked CC settled: {sale_date} CREDIT cell → green (bank ${bank_deposit:,.2f} on {bank_date})"
+        pass
+    return f"Marked CC settled: {sale_date} {matched_label} cell → green (bank ${bank_deposit:,.2f} on {bank_date})"
 
 
 def mark_rebate_paid(vendor: str, entry_date: date) -> str:
