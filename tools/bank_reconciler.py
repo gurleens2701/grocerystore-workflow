@@ -640,11 +640,10 @@ async def _auto_log(
         from datetime import timedelta as _td
         vendor_label = subcategory or description[:128]
 
-        # Look for an existing invoice with matching vendor+amount within the
-        # last 90 days that hasn't already been matched to a bank txn. The bank
-        # check usually clears a few days AFTER the invoice was logged — we want
-        # to mark the ORIGINAL invoice cell paid, not create a duplicate. 90
-        # days covers slow-clearing checks and end-of-quarter settlements.
+        # Step 1: Look in DB for an unmatched invoice with matching vendor+amount
+        # within the past 90 days. The bank check usually clears days AFTER the
+        # invoice was logged — we want to mark the ORIGINAL cell paid.
+        target_date = None
         async with get_async_session() as session:
             existing = (await session.execute(
                 select(Invoice).where(and_(
@@ -663,9 +662,37 @@ async def _auto_log(
                 existing.last_updated_by = "bank_reconciler"
                 await session.commit()
                 target_date = existing.invoice_date
-                log.info("Linked bank txn #%d to existing invoice %s on %s ($%.2f)",
+                log.info("Linked bank txn #%d to existing DB invoice %s on %s ($%.2f)",
                          txn_id, vendor_label, target_date, float_amount)
-            else:
+
+        # Step 2: If no DB match, look in the actual Google Sheet — the owner
+        # may have typed the invoice directly in the sheet without it being
+        # mirrored to DB yet. Match on vendor + amount within 90 days.
+        if target_date is None:
+            try:
+                from tools.sheets_tools import find_cogs_by_vendor
+                sheet_match = await asyncio.to_thread(find_cogs_by_vendor, vendor_label, float_amount, 90)
+                if sheet_match:
+                    target_date, _matched_label = sheet_match
+                    log.info("Linked bank txn #%d to existing SHEET invoice %s on %s ($%.2f)",
+                             txn_id, vendor_label, target_date, float_amount)
+                    # Mirror it into DB so future syncs don't re-create
+                    async with get_async_session() as session:
+                        session.add(Invoice(
+                            store_id=store_id,
+                            vendor=vendor_label,
+                            amount=dec_amount,
+                            invoice_date=target_date,
+                            matched_bank_transaction_id=txn_id,
+                            last_updated_by="bank_reconciler",
+                        ))
+                        await session.commit()
+            except Exception as e:
+                log.warning("Sheet lookup for existing %s invoice failed: %s", vendor_label, e)
+
+        # Step 3: No match found anywhere — log a new invoice on the bank txn date.
+        if target_date is None:
+            async with get_async_session() as session:
                 session.add(Invoice(
                     store_id=store_id,
                     vendor=vendor_label,
@@ -675,9 +702,9 @@ async def _auto_log(
                     last_updated_by="bank_reconciler",
                 ))
                 await session.commit()
-                target_date = txn_date
-                log.info("Auto-logged new invoice store=%s vendor=%s $%.2f on %s",
-                         store_id, vendor_label, float_amount, target_date)
+            target_date = txn_date
+            log.info("Auto-logged new invoice store=%s vendor=%s $%.2f on %s",
+                     store_id, vendor_label, float_amount, target_date)
 
         # Highlight the matched cell — original invoice date if linked, else txn_date.
         try:
