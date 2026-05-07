@@ -636,18 +636,36 @@ async def _auto_log(
             log.warning("Sheet expense write failed for %s: %s", label, e)
 
     elif reconcile_type == "invoice":
+        from sqlalchemy import select, and_
+        from datetime import timedelta as _td
+        vendor_label = subcategory or description[:128]
+
+        # Look for an existing invoice with matching vendor+amount within the
+        # last 90 days that hasn't already been matched to a bank txn. The bank
+        # check usually clears a few days AFTER the invoice was logged — we want
+        # to mark the ORIGINAL invoice cell paid, not create a duplicate. 90
+        # days covers slow-clearing checks and end-of-quarter settlements.
         async with get_async_session() as session:
-            from sqlalchemy import select, and_
-            vendor_label = subcategory or description[:128]
             existing = (await session.execute(
                 select(Invoice).where(and_(
                     Invoice.store_id == store_id,
-                    Invoice.invoice_date == txn_date,
                     Invoice.vendor == vendor_label,
                     Invoice.amount == dec_amount,
+                    Invoice.invoice_date >= (txn_date - _td(days=90)),
+                    Invoice.invoice_date <= txn_date,
+                    Invoice.matched_bank_transaction_id.is_(None),
                 ))
-            )).scalar_one_or_none()
-            if not existing:
+                .order_by(Invoice.invoice_date.desc())
+            )).scalars().first()
+
+            if existing:
+                existing.matched_bank_transaction_id = txn_id
+                existing.last_updated_by = "bank_reconciler"
+                await session.commit()
+                target_date = existing.invoice_date
+                log.info("Linked bank txn #%d to existing invoice %s on %s ($%.2f)",
+                         txn_id, vendor_label, target_date, float_amount)
+            else:
                 session.add(Invoice(
                     store_id=store_id,
                     vendor=vendor_label,
@@ -657,13 +675,14 @@ async def _auto_log(
                     last_updated_by="bank_reconciler",
                 ))
                 await session.commit()
-                log.info("Auto-logged invoice store=%s vendor=%s $%.2f", store_id, vendor_label, float_amount)
+                target_date = txn_date
+                log.info("Auto-logged new invoice store=%s vendor=%s $%.2f on %s",
+                         store_id, vendor_label, float_amount, target_date)
 
-        # Write to Google Sheet (log COGS if empty) + highlight green
+        # Highlight the matched cell — original invoice date if linked, else txn_date.
         try:
             from tools.sheets_tools import log_invoice_and_highlight
-            result = await asyncio.to_thread(log_invoice_and_highlight, vendor_label, float_amount, txn_date
-            )
+            result = await asyncio.to_thread(log_invoice_and_highlight, vendor_label, float_amount, target_date)
             log.info("Sheet: %s", result)
         except Exception as e:
             log.warning("Sheet invoice write failed for %s: %s", subcategory, e)
