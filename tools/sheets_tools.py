@@ -1271,15 +1271,56 @@ def _months_to_check(days_back: int) -> list[date]:
     return list(reversed(months))
 
 
-def find_cogs_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
+def _find_in_section_by_amount(section_hint: str, amount: float, days_back: int = 14) -> list[tuple[date, str, float]]:
+    """Search the active store's sheet for any cell in `section_hint` with
+    matching amount (±$1, within days_back days). Returns list of
+    (entry_date, label, cell_amount), most recent first, capped at 3.
+
+    Uses dynamic section discovery — works for every store's sheet layout.
     """
-    Search COGS section for a vendor + amount match (±$1, within days_back days).
-    Returns (entry_date, exact_vendor_col) or None.
-    """
-    exact_vendor = resolve_vendor(vendor)
-    if exact_vendor not in _VENDOR_COL_INDEX or exact_vendor in ("DATE", "TOTAL"):
-        return None
-    col_idx = _VENDOR_COL_INDEX[exact_vendor]
+    client = _get_client()
+    spreadsheet = client.open_by_key(get_store_sheet_id())
+    today = date.today()
+    matches: list[tuple[date, str, float]] = []
+
+    for month_start in _months_to_check(days_back):
+        try:
+            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
+            sections = _filter_sections_by_hint(_discover_sections(sheet), section_hint)
+            for sec in sections:
+                cols = _section_data_columns(sheet, sec)
+                if not cols:
+                    continue
+                col_to_label = {c: lbl for c, lbl in cols}
+                col_min = min(col_to_label)
+                col_max = max(col_to_label)
+                days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+                row_start = sec["data_start_row"]
+                row_end = row_start + days_in_month - 1
+                start_cell = gspread.utils.rowcol_to_a1(row_start, col_min)
+                end_cell = gspread.utils.rowcol_to_a1(row_end, col_max)
+                rows = sheet.get(f"{start_cell}:{end_cell}")
+                for day_offset, row in enumerate(rows):
+                    for col_offset, cell in enumerate(row):
+                        actual_col = col_min + col_offset
+                        if actual_col not in col_to_label:
+                            continue
+                        val = _parse_cell_amount(cell)
+                        if val is not None and abs(val - amount) <= 1.0:
+                            entry_date = month_start.replace(day=day_offset + 1)
+                            if (today - entry_date).days <= days_back:
+                                matches.append((entry_date, col_to_label[actual_col], val))
+        except Exception:
+            continue
+
+    matches.sort(key=lambda x: x[0], reverse=True)
+    return matches[:3]
+
+
+def _find_in_section_by_label_amount(section_hint: str, label_query: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
+    """Find a cell in `section_hint` whose column matches `label_query` (fuzzy)
+    AND has the given amount (±$1) within days_back days. Returns
+    (entry_date, label) or None."""
     client = _get_client()
     spreadsheet = client.open_by_key(get_store_sheet_id())
     today = date.today()
@@ -1287,126 +1328,52 @@ def find_cogs_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tupl
     for month_start in _months_to_check(days_back):
         try:
             sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
-            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
-            start_cell = gspread.utils.rowcol_to_a1(_COGS_DATA_START, col_idx)
-            end_cell   = gspread.utils.rowcol_to_a1(_COGS_DATA_START + days_in_month - 1, col_idx)
-            col_values = sheet.get(f"{start_cell}:{end_cell}")
-            for day_offset, row in enumerate(col_values):
-                val = _parse_cell_amount(row[0] if row else None)
-                if val is not None and abs(val - amount) <= 1.0:
-                    entry_date = month_start.replace(day=day_offset + 1)
-                    if (today - entry_date).days <= days_back:
-                        return (entry_date, exact_vendor)
+            sections = _filter_sections_by_hint(_discover_sections(sheet), section_hint)
+            for sec in sections:
+                m = _find_in_section_dynamic(sheet, sec, label_query)
+                if not m:
+                    continue
+                col_idx, label = m
+                days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+                row_start = sec["data_start_row"]
+                row_end = row_start + days_in_month - 1
+                start_cell = gspread.utils.rowcol_to_a1(row_start, col_idx)
+                end_cell = gspread.utils.rowcol_to_a1(row_end, col_idx)
+                col_values = sheet.get(f"{start_cell}:{end_cell}")
+                for day_offset, r in enumerate(col_values):
+                    val = _parse_cell_amount(r[0] if r else None)
+                    if val is not None and abs(val - amount) <= 1.0:
+                        entry_date = month_start.replace(day=day_offset + 1)
+                        if (today - entry_date).days <= days_back:
+                            return (entry_date, label)
         except Exception:
             continue
     return None
+
+
+def find_cogs_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
+    return _find_in_section_by_label_amount("invoice", vendor, amount, days_back)
 
 
 def find_cogs_by_amount(amount: float, days_back: int = 14) -> list[tuple[date, str, float]]:
-    """
-    Search COGS section for any vendor with matching amount (±$1, within days_back days).
-    Returns list of (entry_date, vendor_col, cell_amount), most recent first, capped at 3.
-    """
-    client = _get_client()
-    spreadsheet = client.open_by_key(get_store_sheet_id())
-    today = date.today()
-    matches: list[tuple[date, str, float]] = []
-
-    for month_start in _months_to_check(days_back):
-        try:
-            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
-            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
-            start_cell = gspread.utils.rowcol_to_a1(_COGS_DATA_START, 1)
-            end_cell   = gspread.utils.rowcol_to_a1(_COGS_DATA_START + days_in_month - 1, len(COGS_VENDOR_COLS))
-            all_rows   = sheet.get(f"{start_cell}:{end_cell}")
-            for day_offset, row in enumerate(all_rows):
-                for col_offset, cell in enumerate(row):
-                    val = _parse_cell_amount(cell)
-                    if val is not None and abs(val - amount) <= 1.0:
-                        vendor_col = COGS_VENDOR_COLS[col_offset]
-                        if vendor_col in ("DATE", "TOTAL"):
-                            continue
-                        entry_date = month_start.replace(day=day_offset + 1)
-                        if (today - entry_date).days <= days_back:
-                            matches.append((entry_date, vendor_col, val))
-        except Exception:
-            continue
-
-    matches.sort(key=lambda x: x[0], reverse=True)
-    return matches[:3]
+    return _find_in_section_by_amount("invoice", amount, days_back)
 
 
 def find_expense_by_category(category: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
-    """
-    Search EXPENSES section for a category + amount match (±$1, within days_back days).
-    Returns (entry_date, col_name) or None.
-    """
-    col_name = resolve_expense_category(category)
-    if not col_name:
-        return None
-    col_idx = EXPENSES_HEADERS.index(col_name) + 1
-    client = _get_client()
-    spreadsheet = client.open_by_key(get_store_sheet_id())
-    today = date.today()
-
-    for month_start in _months_to_check(days_back):
-        try:
-            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
-            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
-            start_cell = gspread.utils.rowcol_to_a1(_EXP_DATA_START, col_idx)
-            end_cell   = gspread.utils.rowcol_to_a1(_EXP_DATA_START + days_in_month - 1, col_idx)
-            col_values = sheet.get(f"{start_cell}:{end_cell}")
-            for day_offset, row in enumerate(col_values):
-                val = _parse_cell_amount(row[0] if row else None)
-                if val is not None and abs(val - amount) <= 1.0:
-                    entry_date = month_start.replace(day=day_offset + 1)
-                    if (today - entry_date).days <= days_back:
-                        return (entry_date, col_name)
-        except Exception:
-            continue
-    return None
+    return _find_in_section_by_label_amount("expense", category, amount, days_back)
 
 
 def find_expense_by_amount(amount: float, days_back: int = 14) -> list[tuple[date, str, float]]:
-    """
-    Search EXPENSES section for any category with matching amount (±$1, within days_back days).
-    Returns list of (entry_date, col_name, cell_amount), most recent first, capped at 3.
-    """
-    client = _get_client()
-    spreadsheet = client.open_by_key(get_store_sheet_id())
-    today = date.today()
-    matches: list[tuple[date, str, float]] = []
-
-    for month_start in _months_to_check(days_back):
-        try:
-            sheet = _get_or_create_monthly_tab(spreadsheet, month_start)
-            days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
-            n_cols = len(EXPENSES_HEADERS) - 1  # skip TOTAL
-            start_cell = gspread.utils.rowcol_to_a1(_EXP_DATA_START, 2)  # skip DATE
-            end_cell   = gspread.utils.rowcol_to_a1(_EXP_DATA_START + days_in_month - 1, n_cols)
-            all_rows   = sheet.get(f"{start_cell}:{end_cell}")
-            for day_offset, row in enumerate(all_rows):
-                for col_offset, cell in enumerate(row):
-                    val = _parse_cell_amount(cell)
-                    if val is not None and abs(val - amount) <= 1.0:
-                        col_name = EXPENSES_HEADERS[col_offset + 1]  # +1 for DATE skip
-                        if col_name == "TOTAL":
-                            continue
-                        entry_date = month_start.replace(day=day_offset + 1)
-                        if (today - entry_date).days <= days_back:
-                            matches.append((entry_date, col_name, val))
-        except Exception:
-            continue
-
-    matches.sort(key=lambda x: x[0], reverse=True)
-    return matches[:3]
+    return _find_in_section_by_amount("expense", amount, days_back)
 
 
 def find_rebate_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
-    """
-    Search REBATES section for a vendor + amount match (±$1, within days_back days).
-    Returns (entry_date, col_name) or None.
-    """
+    return _find_in_section_by_label_amount("rebate", vendor, amount, days_back)
+
+
+def _legacy_find_rebate_by_vendor_unused(vendor: str, amount: float, days_back: int = 14) -> tuple[date, str] | None:
+    """Kept only so the next chunk of original code below still compiles —
+    it's now dead and will be removed in the next cleanup pass."""
     col_name = resolve_rebate_vendor(vendor)
     if not col_name:
         return None
@@ -1435,16 +1402,7 @@ def find_rebate_by_vendor(vendor: str, amount: float, days_back: int = 14) -> tu
 
 def mark_expense_paid(category: str, entry_date: date) -> str:
     """Turn the expense cell for this category+date green (bank confirmed payment)."""
-    col_name = resolve_expense_category(category)
-    if not col_name:
-        return f"Expense category '{category}' not found"
-    col_idx    = EXPENSES_HEADERS.index(col_name) + 1
-    target_row = _EXP_DATA_START + entry_date.day - 1
-    cell       = gspread.utils.rowcol_to_a1(target_row, col_idx)
-    client     = _get_client()
-    sheet      = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
-    sheet.format(cell, {"backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}})
-    return f"Marked PAID: {col_name} expense on {entry_date}"
+    return _mark_section_cell_paid("expense", category, entry_date, "expense")
 
 
 def mark_cc_settled(sale_date: date, bank_deposit: float, bank_date: date) -> str:
@@ -1476,16 +1434,24 @@ def mark_cc_settled(sale_date: date, bank_deposit: float, bank_date: date) -> st
 
 def mark_rebate_paid(vendor: str, entry_date: date) -> str:
     """Turn the rebate cell for this vendor+date green (bank confirmed receipt)."""
-    col_name = resolve_rebate_vendor(vendor)
-    if not col_name:
-        return f"Rebate vendor '{vendor}' not found"
-    col_idx    = REBATES_HEADERS.index(col_name) + 1
-    target_row = _REV_DATA_START + entry_date.day - 1
-    cell       = gspread.utils.rowcol_to_a1(target_row, col_idx)
-    client     = _get_client()
-    sheet      = _get_or_create_monthly_tab(client.open_by_key(get_store_sheet_id()), entry_date)
-    sheet.format(cell, {"backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}})
-    return f"Marked PAID: {col_name} rebate on {entry_date}"
+    return _mark_section_cell_paid("rebate", vendor, entry_date, "rebate")
+
+
+def _mark_section_cell_paid(kind: str, item: str, entry_date: date, section_hint: str) -> str:
+    """Highlight a section cell green for the given item+date — dynamic discovery."""
+    client = _get_client()
+    spreadsheet = client.open_by_key(get_store_sheet_id())
+    sheet = _get_or_create_monthly_tab(spreadsheet, entry_date)
+    sections = _filter_sections_by_hint(_discover_sections(sheet), section_hint)
+    for sec in sections:
+        m = _find_in_section_dynamic(sheet, sec, item)
+        if m:
+            col_idx, label = m
+            target_row = sec["data_start_row"] + entry_date.day - 1
+            cell = gspread.utils.rowcol_to_a1(target_row, col_idx)
+            sheet.format(cell, {"backgroundColor": _PAID_GREEN})
+            return f"Marked PAID: {label} {kind} on {entry_date}"
+    return f"{kind.capitalize()} {item!r} not found in sheet — skipped paid mark"
 
 
 # ---------------------------------------------------------------------------
@@ -1573,34 +1539,44 @@ def log_payroll_and_highlight(employee: str, amount: float, entry_date: date) ->
     return _log_and_highlight_dynamic(employee, amount, entry_date, "payroll")
 
 
+def _match_description_to_section(description: str, section_hint: str) -> str | None:
+    """Find a column in `section_hint` whose label appears as a word in
+    `description`. Returns the matched column LABEL (as it appears in the
+    sheet) or None. Reads the active store's actual sheet — no hardcoded
+    alias maps."""
+    import re
+    try:
+        client = _get_client()
+        spreadsheet = client.open_by_key(get_store_sheet_id())
+        sheet = _get_or_create_monthly_tab(spreadsheet, date.today())
+        sections = _filter_sections_by_hint(_discover_sections(sheet), section_hint)
+    except Exception:
+        return None
+
+    desc_norm = re.sub(r"[^a-z0-9\s]", " ", description.lower())
+    candidates: list[tuple[str, int]] = []  # (label, length-for-tiebreak)
+    for sec in sections:
+        for _, label in _section_data_columns(sheet, sec):
+            label_norm = _normalize_label(label)
+            if len(label_norm) < 3:
+                continue
+            pattern = r"\b" + re.escape(label_norm) + r"\b"
+            if re.search(pattern, desc_norm):
+                candidates.append((label, len(label_norm)))
+    if not candidates:
+        return None
+    # Prefer longest match (most specific)
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    return candidates[0][0]
+
+
 def match_description_to_cogs_vendor(description: str) -> str | None:
-    """Return the COGS vendor column name if any alias appears in the description."""
-    desc_lower = description.lower()
-    for alias in sorted(VENDOR_ALIAS_MAP.keys(), key=len, reverse=True):
-        if alias in ("date", "total"):
-            continue
-        if alias in desc_lower:
-            return VENDOR_ALIAS_MAP[alias]
-    return None
+    return _match_description_to_section(description, "invoice")
 
 
 def match_description_to_expense(description: str) -> str | None:
-    """Return the expense column name if any alias appears in the description."""
-    desc_lower = description.lower()
-    for alias in sorted(_EXPENSE_COL_MAP.keys(), key=len, reverse=True):
-        if alias in ("date", "total", "inventory"):
-            continue
-        if alias in desc_lower:
-            return _EXPENSE_COL_MAP[alias]
-    return None
+    return _match_description_to_section(description, "expense")
 
 
 def match_description_to_rebate(description: str) -> str | None:
-    """Return the rebate column name if any alias appears in the description."""
-    desc_lower = description.lower()
-    for alias in sorted(_REBATE_COL_MAP.keys(), key=len, reverse=True):
-        if alias in ("date", "total"):
-            continue
-        if alias in desc_lower:
-            return _REBATE_COL_MAP[alias]
-    return None
+    return _match_description_to_section(description, "rebate")
